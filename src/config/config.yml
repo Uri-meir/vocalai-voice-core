@@ -1,0 +1,23 @@
+audio:
+  send_sample_rate: 16000
+  receive_sample_rate: 24000
+  channels: 1
+  chunk_size_vad: 480
+  chunk_size_default: 1024
+
+vad:
+  enabled: false
+  mode: 3
+
+gemini:
+  model_id: "gemini-2.5-flash-native-audio-preview-09-2025"
+  use_defaults: true
+  voice_name: "Aoede"
+  temperature: 0.4
+  greeting_text: "שלום שמי שיר, מהמרפאה של אורי מאיר. כיצד אוכל לסייע ?"
+
+twilio:
+  account_sid: "${TWILIO_ACCOUNT_SID}"
+  auth_token: "${TWILIO_AUTH_TOKEN}"
+  phone_number: "${TWILIO_PHONE_NUMBER}"
+  public_url: "${PUBLIC_URL}"

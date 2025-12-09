@@ -1,0 +1,10 @@
+google-genai
+pyaudio
+python-dotenv
+colorlog
+webrtcvad-wheels
+PyYAML
+fastapi
+uvicorn[standard]
+twilio
+python-multipart
