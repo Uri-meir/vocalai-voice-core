@@ -42,6 +42,7 @@ class ConfigManager:
     # --- Secrets (from .env) ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
+    SUPABASE_VAPI_WEBHOOK_URL = os.getenv("SUPABASE_VAPI_WEBHOOK_URL")
 
     # --- Computed Properties ---
     @property
@@ -60,12 +61,14 @@ class ConfigManager:
         except FileNotFoundError:
             return None
 
-    @classmethod
     def validate(cls):
         """Validates that essential environment variables are set."""
         if not cls.GEMINI_API_KEY:
             print("❌ Error: Missing GEMINI_API_KEY or GOOGLE_API_KEY in .env file.")
             sys.exit(1)
+        if not cls._load_config().get("supabase", {}).get("vapi_webhook_url"):
+             # Optional: warn or fail? User didn't specify strict requirement, but better to log warning if missing when events needed.
+             pass
 
 # Singleton Instance for easy import
 config = ConfigManager()

@@ -8,11 +8,13 @@ logger = logging.getLogger(__name__)
 class GeminiLiveClient:
     """Handles the connection and bidirectional communication with Gemini Live."""
 
-    def __init__(self, input_queue: asyncio.Queue, output_queue: asyncio.Queue):
+    def __init__(self, input_queue: asyncio.Queue, output_queue: asyncio.Queue, transcript_callback=None):
         self.client = genai.Client(api_key=config.GEMINI_API_KEY)
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.session = None
+        # self.transcript_callback = transcript_callback
+        self.connected_event = asyncio.Event()
 
     async def start(self, system_instruction: str = None):
         """Connects to Gemini Live and starts send/receive loops."""
@@ -49,6 +51,7 @@ class GeminiLiveClient:
                 config=config_params,
             ) as session:
                 self.session = session
+                self.connected_event.set()
                 logger.info("✅ Connected to Gemini Live")
 
                 # Run send/receive loops in parallel
@@ -109,10 +112,20 @@ class GeminiLiveClient:
                             continue
 
                         for part in sc.model_turn.parts:
+                            # Handle Audio
                             inline = getattr(part, "inline_data", None)
                             if inline and isinstance(inline.data, (bytes, bytearray)):
                                 # Audio data (PCM 24kHz)
                                 await self.output_queue.put(inline.data)
+                            
+                            # Handle Text
+                            # text_content = getattr(part, "text", None)
+                            # if text_content:
+                            #     if self.transcript_callback:
+                            #         # We invoke the callback. It might be partial text or full text depending on streaming behavior.
+                            #         # For now, we assume we receive chunks and pass them along.
+                            #         await self.transcript_callback(text_content, "assistant")
+
                     except Exception as e:
                         logger.error(f"Error processing response part: {e}")
 

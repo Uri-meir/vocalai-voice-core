@@ -8,3 +8,4 @@ fastapi
 uvicorn[standard]
 twilio
 python-multipart
+httpx

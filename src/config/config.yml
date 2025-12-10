@@ -21,3 +21,6 @@ twilio:
   auth_token: "${TWILIO_AUTH_TOKEN}"
   phone_number: "${TWILIO_PHONE_NUMBER}"
   public_url: "${PUBLIC_URL}"
+
+supabase:
+  vapi_webhook_url: "${SUPABASE_VAPI_WEBHOOK_URL}"

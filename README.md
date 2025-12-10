@@ -1,87 +1,194 @@
-# Gemini Native Audio Realtime POC
+🎙️ VocalAI Realtime Voice Engine
+High-Performance Telephony ↔ Voice AI Bridge
 
-This project is a Proof of Concept (POC) demonstrating real-time, bidirectional audio communication with Google's `gemini-2.5-flash-native-audio-preview-09-2025` model using WebSockets.
+Author: Uri Meir
 
-## Features
+🚀 Overview
 
-- **Real-time Audio Streaming**: Captures microphone input and streams it to Gemini.
-- **Native Audio Response**: Receives high-quality (24kHz) PCM audio from Gemini and plays it back instantly.
-- **Modular Architecture**: Clean separation of concerns (Audio Input, Audio Output, Gemini Client, Config).
-- **AsyncIO**: Fully asynchronous implementation using Python's `asyncio`.
-- **Extensible**: Ready for future integration with Telephony (Twilio/Plivo) and Tool Calling.
+VocalAI Realtime Voice Engine is a low-latency, bidirectional audio streaming server that connects traditional telephony (Twilio) with modern Voice AI models in real time.
 
-## Prerequisites
+It enables:
 
-- Python 3.10+
-- macOS, Linux, or Windows
-- A Google Cloud Project with Gemini API access
-- API Key (Get it from [Google AI Studio](https://aistudio.google.com/))
+📞 Real-time phone conversations with AI
 
-## Installation
+🔁 Two-way streaming audio (user ↔ model)
 
-1.  **Clone the repository** (if applicable) or navigate to the project directory:
-    ```bash
-    cd POC_gemini_realtime
-    ```
+🧠 Intelligent session handling (start/end, duration, metadata)
 
-2.  **Create a Virtual Environment** (Recommended):
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
+📡 Webhook event delivery compatible with existing Vapi-style workflows
 
-3.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+🧱 Modular AI adapters — model-agnostic architecture (Gemini / OpenAI / Deepgram / Custom)
 
-   *Note: On macOS, you might need to install `portaudio` first if `pyaudio` installation fails:*
-   ```bash
-   brew install portaudio
-   ```
+This engine forms the foundation of the VocalAI Voice Provider - a fully self-hosted, scalable solution.
 
-4.  **Configure Environment**:
-    copy `.env.example` to `.env` and add your API key:
-    ```bash
-    cp .env.example .env
-    ```
-    Edit `.env`:
-    ```ini
-    GEMINI_API_KEY=your_actual_api_key_here
-    USER_PHONE_NUMBER=+972500000000
-    ```
+🏗️ Architecture
+User (Phone)
+   │
+PSTN / SIP
+   │
+Twilio
+   │          HTTP (Webhooks), WebSocket (Media)
+   ▼
+FastAPI Realtime Engine
+ ┌──────────────────────────────────────────┐
+ │ Telephony Layer                          │
+ │   • /twilio/voice-hook                   │
+ │   • /twilio/media-stream                 │
+ │                                          │
+ │ Core Logic                               │
+ │   • CallSession + SessionStore           │
+ │   • EventEmitter (call.started / ended)  │
+ │                                          │
+ │ Audio Layer                              │
+ │   • Transcoding Mulaw ↔ PCM              │
+ │   • Resampling (8k ↔ 16/24k)             │
+ │                                          │
+ │ Model Adapters                           │
+ │   • AIClient Interface                   │
+ │   • GeminiClient / OpenAIClient / …      │
+ └──────────────────────────────────────────┘
+   │
+   ▼
+Supabase (Webhooks, Logs, Usage)
 
-## Usage
 
-Run the main application:
+The system is built to be:
 
-```bash
-python src/main.py
-```
+Scalable (websocket-per-call model with horizontal autoscaling)
 
-- You should see logs indicating successful connection.
-- Speak into your microphone.
-- You will hear Gemini respond through your speakers.
-- Press `Ctrl+C` to stop.
+Model-agnostic (swap AI providers without touching telephony)
 
-## Project Structure
+Extensible (tool calling, structured reasoning, multiple voices)
 
-```
+Low-latency (optimized audio pipeline)
+
+🔌 Supported Workflows
+1. Inbound Calls
+
+Twilio triggers /twilio/voice-hook
+
+Server responds with TwiML <Stream>
+
+Twilio opens a WebSocket to /twilio/media-stream
+
+Real-time streaming begins (two-way)
+
+On disconnect → call.ended event is emitted
+
+2. Outbound Calls
+
+UI → N8N → /call/start
+
+Twilio dials user
+
+Once call connects → streaming begins
+
+call.started / call.ended callbacks sent to Supabase
+
+Both flows appear identical to the rest of your platform.
+
+🔧 Module Overview
+Telephony Layer
+
+Handles Twilio HTTP & WebSocket traffic
+
+Converts telephony audio into model-ready audio and back
+
+Owns streaming loops
+
+Core Logic
+
+SessionStore: tracks all live calls
+
+CallSession: encapsulates call state
+
+EventEmitter: forwards events to Supabase in Vapi-compatible format
+
+Model Adapter Layer
+
+A flexible interface:
+
+class AIClient:
+    async def connect(self): ...
+    async def send_audio(self, pcm_bytes): ...
+    async def receive_audio(self): ...
+    async def close(self): ...
+
+
+You may plug in:
+
+Gemini Live
+
+OpenAI Realtime
+
+Deepgram Aura
+
+Custom local inference
+…and the system behaves the same.
+
+Audio Processing
+
+Mulaw ↔ PCM16
+
+Resample 8k ↔ 16/24k
+
+Level normalization
+
+🌐 REST API
+POST /call/start
+
+Initiates an outbound call through Twilio.
+
+Request
+{
+  "assistantId": "abc123",
+  "phoneNumberId": "twilio_number_uuid",
+  "customer": { "number": "+972500000000" }
+}
+
+Response
+{ "status": "initiated", "call_id": "xyz789" }
+
+🧪 Development
+uvicorn src.main:app --reload
+
+
+Optionally expose locally for Twilio:
+
+ngrok http 8000
+
+🗂️ Project Structure
 src/
-├── audio/
-│   ├── audio_input.py   # Microphone Helper
-│   └── audio_output.py  # Speaker Helper
-├── gemini/
-│   └── client.py        # Gemini Live API Client
-├── config/
-│   └── environment.py   # Config loading
-├── utils/
-│   └── logging_setup.py # Logger config
-└── main.py              # Entry point
-```
+├── api/                 # REST endpoints (call/start)
+├── telephony/           # Twilio voice hook + media stream
+├── core/                # Session and event logic
+├── ai_providers/        # Swappable model clients
+├── audio/               # Transcoding & resampling
+├── utils/               # Logging, helpers
+└── config/              # Environment + config loader
 
-## Troubleshooting
+📣 Why This Engine?
 
-- **Microphone issues**: Ensure your OS permissions allow the terminal/python to access the microphone.
-- **Audio glitches**: Adjust `CHUNK_SIZE` in `src/config/environment.py`.
-- **Connection errors**: Verify your API Key and internet connection.
+Full control over latency, cost, and routing
+
+Battle-tested audio pipeline
+
+Scales to thousands of concurrent calls
+
+Adaptable to any future AI provider
+
+Already plugged into your existing Supabase + N8N + React system
+
+🏁 Status
+
+✔ Inbound calls fully operational
+
+✔ Outbound calls integrated
+
+✔ Supabase event compatibility verified
+
+✔ Session management stable
+
+✔ Model-agnostic architecture
+
+⏳ Next: multi-model routing, tool calling, diarization
