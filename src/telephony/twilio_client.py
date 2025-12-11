@@ -10,9 +10,10 @@ class TwilioClientWrapper:
         self.phone_number = config.get("twilio.phone_number")
         self.public_url = config.get("twilio.public_url")
 
-    def make_call(self, to: str):
+    def make_call(self, to: str, assistant_id: str, customer_number: str = None):
         """Initiates an outbound call to the specified number."""
-        url = f"{self.public_url}/twilio/voice-hook"
+        # We pass customer_number in query to forward to media stream for logging
+        url = f"{self.public_url}/twilio/voice-hook?assistant_id={assistant_id}&customer_number={customer_number or to}"
         try:
             call = self.client.calls.create(
                 to=to,

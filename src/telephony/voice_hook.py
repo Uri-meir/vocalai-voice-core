@@ -12,9 +12,6 @@ async def voice_hook(request: Request):
     logger.info("📞 Incoming call received")
     
     resp = VoiceResponse()
-    # Removed static greeting to allow AI to speak first
-    # resp.say("Connecting you to your AI assistant.")
-    
     connect = Connect()
     public_url = config.get("twilio.public_url")
     if not public_url:
@@ -22,11 +19,16 @@ async def voice_hook(request: Request):
         resp.say("System configuration error.")
         return Response(content=str(resp), media_type="application/xml")
 
-    # Clean the URL (remove https://)
     stream_url = public_url.replace("https://", "wss://").replace("http://", "ws://")
     stream_url += "/twilio/media-stream"
     
-    connect.stream(url=stream_url)
+    # Get assistant_id and customer_number from query params
+    assistant_id = request.query_params.get("assistant_id")
+    customer_number = request.query_params.get("customer_number")
+
+    stream = connect.stream(url=stream_url)
+    stream.parameter(name="assistant_id", value=assistant_id)
+    stream.parameter(name="customer_number", value=customer_number)
     resp.append(connect)
     
     return Response(content=str(resp), media_type="application/xml")
