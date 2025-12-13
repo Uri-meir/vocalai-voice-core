@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, AliasChoices
+from pydantic import BaseModel, Field, AliasChoices, UUID4
 from typing import Optional, Dict
 
 class CustomerData(BaseModel):
@@ -16,3 +16,9 @@ class StartCallRequest(BaseModel):
     @property
     def assistant_id(self) -> str:
         return self.assistantId
+
+class RegisterPhoneNumberRequest(BaseModel):
+    assistantId: UUID4
+    professionalSlug: str
+    phoneNumber: str
+    twilioAccountSid: Optional[str] = None

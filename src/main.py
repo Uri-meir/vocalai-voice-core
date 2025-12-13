@@ -4,8 +4,10 @@ from fastapi import FastAPI
 from src.config.environment import config
 from src.utils.logging_setup import setup_logging
 from src.telephony.voice_hook import router as voice_router
+from src.telephony.inbound import router as inbound_router
 from src.telephony.media_stream import router as media_router
 from src.api.routes.assistants import router as assistants_router
+from src.api.routes.phone_numbers import router as phone_numbers_router
 from src.telephony.twilio_client import TwilioClientWrapper
 from fastapi import Body
 
@@ -18,8 +20,10 @@ app = FastAPI(title="Gemini Telephony Server")
 
 # Include Routers
 app.include_router(voice_router, prefix="/twilio")
+app.include_router(inbound_router, prefix="/twilio")
 app.include_router(media_router, prefix="/twilio")
 app.include_router(assistants_router)
+app.include_router(phone_numbers_router)
 
 @app.on_event("startup")
 async def startup_event():

@@ -45,7 +45,7 @@ class AssistantResponse(BaseModel):
             metadata=config.metadata
         )
 
-@router.post("/", response_model=AssistantResponse)
+@router.post("", response_model=AssistantResponse)
 async def create_assistant(
     payload: Dict[str, Any],
     repo: AssistantRepository = Depends(get_repo)
