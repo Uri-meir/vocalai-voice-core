@@ -64,6 +64,24 @@ class SupabaseVapiWebhookEmitter:
         }
         await self._emit(payload, "call.started", call_id)
 
+    async def emit_meeting_scheduled(
+        self,
+        call_id: str,
+        assistant_id: str,
+        meeting_details: Dict[str, Any]
+    ) -> None:
+        payload = {
+            "message": {
+                "type": "meeting.scheduled",
+                "call": {
+                    "id": call_id,
+                    "assistantId": assistant_id
+                },
+                "meeting": meeting_details
+            }
+        }
+        await self._emit(payload, "meeting.scheduled", call_id)
+
     async def emit_call_ended(
         self,
         call_id: str,

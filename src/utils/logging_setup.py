@@ -18,6 +18,10 @@ def setup_logging(level=logging.INFO):
     ))
 
     logger = colorlog.getLogger()
+    
+    # Clear existing handlers to prevent duplicates (uvicorn reload imports module twice)
+    logger.handlers.clear()
+    
     logger.addHandler(handler)
     logger.setLevel(level)
     

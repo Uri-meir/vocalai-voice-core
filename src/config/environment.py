@@ -42,6 +42,16 @@ class ConfigManager:
     # --- Secrets (from .env) ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
+    GEMINI_VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Puck")
+
+    @property
+    def GEMINI_MODEL_ID(self):
+        # Allow env var override, otherwise fallback to config.yml
+        env_model = os.getenv("GEMINI_MODEL_ID")
+        if env_model: return env_model
+        
+        # Read from config.yml (which points to 2.5 flash native audio)
+        return self.get("gemini.model_id", "models/gemini-2.0-flash-exp")
 
     # --- Computed Properties ---
     @property

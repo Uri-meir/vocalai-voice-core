@@ -25,3 +25,20 @@ class TwilioClientWrapper:
         except Exception as e:
             logger.error(f"❌ Failed to make call: {e}")
             raise
+
+    def transfer_call(self, call_sid: str, to_number: str):
+        """
+        Transfers a live call to another number using a TwiML redirect.
+        This effectively "blind transfers" the call.
+        """
+        try:
+            # We update the call to a TwiML Bin or construct TwiML on the fly.
+            # 'twiml' parameter allows passing raw TwiML instructions directly.
+            twiml = f"<Response><Say>Transferring your call.</Say><Dial>{to_number}</Dial></Response>"
+            
+            call = self.client.calls(call_sid).update(twiml=twiml)
+            logger.info(f"🔄 Transferred call {call_sid} to {to_number}")
+            return call
+        except Exception as e:
+            logger.error(f"❌ Failed to transfer call {call_sid}: {e}")
+            raise

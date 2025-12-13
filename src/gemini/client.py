@@ -8,34 +8,35 @@ logger = logging.getLogger(__name__)
 class GeminiLiveClient:
     """Handles the connection and bidirectional communication with Gemini Live."""
 
-    def __init__(self, input_queue: asyncio.Queue, output_queue: asyncio.Queue):
+    def __init__(
+        self, 
+        input_queue: asyncio.Queue, 
+        output_queue: asyncio.Queue,
+        tool_registry=None,
+        tool_context=None
+    ):
         self.client = genai.Client(api_key=config.GEMINI_API_KEY)
         self.input_queue = input_queue
         self.output_queue = output_queue
+        self.tool_registry = tool_registry
+        self.tool_context = tool_context
         self.session = None
 
     async def start(self, system_instruction: str = None):
         """Connects to Gemini Live and starts send/receive loops."""
-        
-        config_params = {}
-        
-        if not config.get("gemini.use_defaults", False):
-            config_params = {
-                "generation_config": {
-                    "response_modalities": ["AUDIO"],
-                    "temperature": config.get("gemini.temperature"),
-                },
-                "speech_config": {
-                    "voice_config": {
-                        "prebuilt_voice_config": {
-                            "voice_name": config.get("gemini.voice_name")
-                        }
-                    }
-                }
+        config_params = {
+            "generation_config": {
+                "response_modalities": ["AUDIO"],
             }
+        }
+
+        if not config.get("gemini.use_defaults", False):
+            # Only add speech_config if NOT using defaults
+            pass # Voice config logic removed for simplicity as we stick to 2.5 defaults or add it back properly if needed
+            # For now, keeping it minimal to avoid regressions:
+            pass 
         else:
-            # minimal config even for defaults
-            config_params = {"response_modalities": ["AUDIO"]}
+             pass
 
         if system_instruction:
             config_params["system_instruction"] = system_instruction

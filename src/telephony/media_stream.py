@@ -25,11 +25,7 @@ async def media_stream(websocket: WebSocket):
     mic_queue = asyncio.Queue()     # Twilio -> Gemini
     speaker_queue = asyncio.Queue() # Gemini -> Twilio
     
-    # Initialize Gemini Client (default, will re-conf later or pass params)
-    client = GeminiLiveClient(input_queue=mic_queue, output_queue=speaker_queue)
-    
     stream_sid = None
-    gemini_task = None
     sender_task = None
     call_session = None
     
@@ -79,12 +75,17 @@ async def media_stream(websocket: WebSocket):
                     meta = assistant_config.metadata or {}
                     assistant_id_webhook = meta.get("vapi_assistant_id", assistant_config.id)
                     
-                    # Update System Prompt from Config
-                    system_instruction = assistant_config.system_prompt
+                    # Update System Prompt from Config safely
+                    base_instruction = assistant_config.system_prompt or "You are a helpful assistant."
                 else:
                     logger.warning("⚠️ No Assistant Config found, using defaults.")
-                    system_instruction = "You are a helpful assistant."
+                    base_instruction = "You are a helpful assistant."
                     assistant_id_webhook = internal_assistant_id # Fallback
+
+                # Append Tool Usage Optimization
+                # Force instant execution and suppress "planning" monologues
+                # Revert to simple instruction (remove Tool Rules which might be causing silence/confusion)
+                system_instruction = base_instruction
 
                 # Emit call.started
                 if assistant_id_webhook and call_id:
@@ -99,6 +100,56 @@ async def media_stream(websocket: WebSocket):
                         )
                     )
 
+                # --- Tool Registry Setup ---
+                from src.tools.registry import ToolRegistry, ToolContext
+                from src.tools.scheduling import get_open_slots_tool, book_appointment_tool
+                from src.tools.telephony import transfer_call_tool
+                from src.tools.schemas import GetOpenSlotsArgs, BookAppointmentArgs, TransferCallArgs
+
+                tool_registry = ToolRegistry()
+                
+                # Register Scheduling Tools
+                tool_registry.register(
+                    name="getOpenSlots",
+                    description="Checks calendar availability. Arguments: 'requestedAppointment' (ISO string like '2024-12-25T10:00:00+02:00'). Returns list of slots.",
+                    args_model=GetOpenSlotsArgs,
+                    side_effect=False
+                )(get_open_slots_tool)
+
+                tool_registry.register(
+                    name="bookAppointment",
+                    description="Books an appointment. REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result).",
+                    args_model=BookAppointmentArgs,
+                    side_effect=True
+                )(book_appointment_tool)
+
+                # Register Telephony Tools
+                tool_registry.register(
+                    name="transfer_call_tool",
+                    description="Use this tool to transfer the caller to a real person when requested or when escalation is needed.",
+                    args_model=TransferCallArgs,
+                    side_effect=True
+                )(transfer_call_tool)
+                
+                # Create Tool Context
+                tool_context = ToolContext(
+                    call_id=call_id,
+                    twilio_call_sid=call_id, # Twilio sends callSid as callId usually
+                    professional_slug=assistant_config.professional_slug if assistant_config else "unknown",
+                    assistant_id_webhook=assistant_id_webhook,
+                    caller_timezone=assistant_config.timezone if assistant_config else "Asia/Jerusalem",
+                    state={}
+                )
+
+                # Re-Initialize Client with Tools
+                # We overwrite the initial client (which was empty)
+                client = GeminiLiveClient(
+                    input_queue=mic_queue, 
+                    output_queue=speaker_queue,
+                    tool_registry=tool_registry,
+                    tool_context=tool_context
+                )
+
                 # Start Gemini Session with Configured Prompt
                 # Voice is static (defaults in client), ignoring config.voice_id as requested
                 gemini_task = asyncio.create_task(
@@ -106,11 +157,14 @@ async def media_stream(websocket: WebSocket):
                         system_instruction=system_instruction
                     )
                 )
+                
+                gemini_task.set_name("Gemini_Client_Task")
 
                 # Start Outbound Sender
                 async def send_audio_to_twilio():
-                    while True:
-                        try:
+                    logger.info("🚀 Starting Twilio Sender Loop")
+                    try:
+                        while True:
                             # Get PCM24k/16k from Gemini
                             chunk = await speaker_queue.get()
                             if not chunk: continue
@@ -129,29 +183,14 @@ async def media_stream(websocket: WebSocket):
                                     "streamSid": stream_sid,
                                     "media": {"payload": payload}
                                 })
-                        except Exception as e:
-                            logger.error(f"Error sending to Twilio: {e}")
-                            break
+                                
+                    except Exception as e:
+                        logger.error(f"❌ Error sending to Twilio: {e}", exc_info=True)
+                        raise
                 
                 sender_task = asyncio.create_task(send_audio_to_twilio())
+                sender_task.set_name("Twilio_Sender_Task")
 
-                # Trigger Initial Greeting
-                # Strictly use first_message from config
-                if assistant_config and assistant_config.first_message:
-                    greeting_text = assistant_config.first_message
-                    async def trigger_greeting():
-                        for _ in range(10): 
-                            if client.session:
-                                break
-                            await asyncio.sleep(0.5)
-                        
-                        if client.session:
-                            logger.info(f"🗣️ Speaking First Message: {greeting_text}")
-                            # Send the text to prompt the model to speak it
-                            await client.send_text(f"Say exactly this to start: '{greeting_text}'")
-                    
-                    asyncio.create_task(trigger_greeting())
-                
             elif event == "media":
                 payload = data.get("media", {}).get("payload")
                 if payload:
@@ -174,7 +213,7 @@ async def media_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("🔌 WebSocket Disconnected")
     except Exception as e:
-        logger.error(f"❌ Media Stream Error: {e}")
+        logger.error(f"❌ Main Media Stream Loop Crashed: {e}", exc_info=True)
     finally:
         # Cleanup
         if gemini_task: gemini_task.cancel()
