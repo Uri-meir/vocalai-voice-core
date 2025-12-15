@@ -20,7 +20,7 @@ class ConfigManager:
                     # Interpolate environment variables manually
                     # This is a simple implementation, for advanced use replace with a regex or library
                     for key, value in os.environ.items():
-                        content = content.replace(f"${{{key}}}", value)
+                        content = content.replace(f"${{{key}}}", value.strip())
                     cls._config = yaml.safe_load(content)
             except FileNotFoundError:
                 print("❌ Error: config.yml not found in src/config/")
