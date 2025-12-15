@@ -13,7 +13,7 @@ async def voice_hook(request: Request):
     
     resp = VoiceResponse()
     connect = Connect()
-    public_url = config.get("twilio.public_url")
+    public_url = config.get("twilio.public_url").strip() if config.get("twilio.public_url") else ""
     if not public_url:
         logger.error("❌ PUBLIC_URL not set in config")
         resp.say("System configuration error.")
