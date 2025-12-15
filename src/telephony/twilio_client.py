@@ -8,7 +8,7 @@ class TwilioClientWrapper:
     def __init__(self):
         self.client = Client(config.get("twilio.account_sid"), config.get("twilio.auth_token"))
         self.phone_number = config.get("twilio.phone_number")
-        self.public_url = config.get("twilio.public_url")
+        self.public_url = config.get("twilio.public_url").strip() if config.get("twilio.public_url") else ""
 
     def make_call(self, to: str, assistant_id: str, customer_number: str = None):
         """Initiates an outbound call to the specified number."""

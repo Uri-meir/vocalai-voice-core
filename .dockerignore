@@ -1,0 +1,18 @@
+# Git
+.git
+.gitignore
+
+# Environment variables
+.env
+.env.example
+
+# Python / Virtual Env
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+# Logs
+logs
