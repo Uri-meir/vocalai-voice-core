@@ -2,7 +2,11 @@
 FROM python:3.9-slim
 
 # Set the working directory in the container
+# Set the working directory in the container
 WORKDIR /app
+
+# Ensure output is sent directly to terminal (no buffering)
+ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies (needed for pyaudio and other tools)
 # portaudio19-dev is required for pyaudio
