@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from google import genai
+from google.genai import types
 from src.config.environment import config
 
 logger = logging.getLogger(__name__)
@@ -22,13 +23,22 @@ class GeminiLiveClient:
         self.tool_context = tool_context
         self.session = None
 
-    async def start(self, system_instruction: str = None):
+    async def start(self, system_instruction: str = None, initial_text: str = None):
         """Connects to Gemini Live and starts send/receive loops."""
         config_params = {
             "generation_config": {
                 "response_modalities": ["AUDIO"],
             }
         }
+        
+        # Inject Tools if available
+        if self.tool_registry:
+            declarations = self.tool_registry.get_gemini_declarations()
+            if declarations:
+                logger.info(f"🔧 Injecting {len(declarations)} tools into Gemini session")
+                # Wrap declarations in a Tool object as required by SDK
+                tool_obj = types.Tool(function_declarations=declarations)
+                config_params["tools"] = [tool_obj]
 
         if not config.get("gemini.use_defaults", False):
             # Only add speech_config if NOT using defaults
@@ -51,6 +61,11 @@ class GeminiLiveClient:
             ) as session:
                 self.session = session
                 logger.info("✅ Connected to Gemini Live")
+
+                # Send initial text if provided (fire and forget)
+                if initial_text:
+                    logger.info(f"🗣️ Sending First Message: {initial_text}")
+                    asyncio.create_task(self.send_text(initial_text))
 
                 # Run send/receive loops in parallel
                 # Using gather for Python 3.9 compatibility (TaskGroup is 3.11+)
@@ -87,37 +102,64 @@ class GeminiLiveClient:
                 break
 
     async def _receive_loop(self):
-        """Receives responses from Gemini and pushes audio to output queue."""
+        """Receives responses from Gemini, handles interactions."""
         try:
             while True:
                 # We need to loop over receive() which yields "turns"
                 # And turns yield "responses"
-                # This might change based on exact SDK version, keeping consistent with POC
+                # NOTE: In new SDK 0.5+, receive() yields responses directly in async loop context
+                # session.receive() is an async generator
                 
-                # Note: The POC had 'turn = session.receive()', but in async context 
-                # we usually iterate: 'async for response in session.receive():'
-                # Let's check the POC reference carefully.
-                # POC:
-                # turn = session.receive()
-                # async for response in turn: ...
-                
-                # Implementation:
-                turn = self.session.receive()
-                async for response in turn:
-                    try:
-                        sc = getattr(response, "server_content", None)
-                        if not sc or not sc.model_turn:
-                            continue
-
-                        for part in sc.model_turn.parts:
+                async for response in self.session.receive():
+                    # 1. Handle Audio (Priority)
+                    if response.server_content and response.server_content.model_turn:
+                        for part in response.server_content.model_turn.parts:
                             inline = getattr(part, "inline_data", None)
                             if inline and isinstance(inline.data, (bytes, bytearray)):
                                 # Audio data (PCM 24kHz)
                                 await self.output_queue.put(inline.data)
-                    except Exception as e:
-                        logger.error(f"Error processing response part: {e}")
+
+                    # 2. Handle Tool Calls (Async)
+                    if response.tool_call:
+                        for fc in response.tool_call.function_calls:
+                            # Use fire-and-forget task to avoid blocking audio consumption
+                            # We can also track them if clean shutdown is needed
+                            asyncio.create_task(self._handle_tool_call(fc))
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"Error in receive loop: {e}")
+
+    async def _handle_tool_call(self, fc):
+        """Executes tool and sends response back to Gemini."""
+        try:
+            name = fc.name
+            args = fc.args
+            call_id = fc.id
+            
+            logger.info(f"🛠️ Tool Call: {name}({args})")
+            
+            # Execute
+            if self.tool_registry:
+                # Returns ToolResult
+                result = await self.tool_registry.execute(name, args, self.tool_context)
+                
+                # Serialize full envelope (success, data, error) for model clarity
+                response_data = result.model_dump(mode='json')
+            else:
+                logger.error("Tool registry not initialized but tool called!")
+                response_data = {"error": "Registry not initialized"}
+
+            # Send Response
+            f_response = types.FunctionResponse(
+                id=call_id,
+                name=name,
+                response=response_data 
+            )
+            
+            # logger.info(f"📤 Sending Tool Response: {response_data}")
+            await self.session.send_tool_response(function_responses=[f_response])
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling tool call {fc.name}: {e}", exc_info=True)

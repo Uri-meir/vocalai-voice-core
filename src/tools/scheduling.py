@@ -33,7 +33,11 @@ async def get_open_slots_tool(args: GetOpenSlotsArgs, context: ToolContext) -> T
         args=args.model_dump(exclude_none=True),
         context_data={
             "call_id": context.call_id,
-            "professional_slug": context.professional_slug
+            "professional_slug": context.professional_slug,
+            "cal_username": context.cal_username,
+            "event_type_slug": context.event_type_slug,
+            "cal_api_key": context.cal_api_key,
+            "customer_number": context.customer_number
         }
     )
 
@@ -57,7 +61,13 @@ async def book_appointment_tool(args: BookAppointmentArgs, context: ToolContext)
         args=args_dict,
         context_data={
             "call_id": context.call_id,
-            "professional_slug": context.professional_slug
+            "professional_slug": context.professional_slug,
+            "cal_username": context.cal_username,
+            "event_type_slug": context.event_type_slug,
+            "cal_api_key": context.cal_api_key,
+            "customer_number": context.customer_number,
+            "business_phone": context.business_phone,
+            "buissnes_owner": context.business_owner_name
         }
     )
     

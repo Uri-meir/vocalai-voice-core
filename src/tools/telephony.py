@@ -20,14 +20,36 @@ async def transfer_call_tool(args: TransferCallArgs, context: ToolContext) -> To
         logger.info(f"📞 Initiating transfer for call {context.twilio_call_sid}")
         
         # 2. Execute Transfer (Side Effect)
+        # Use dynamic business phone if available, else fallback provided by caller or config
+        target_number = context.business_phone or ESCALATION_NUMBER
+        if not target_number:
+            raise ValueError("No transfer destination available (business_phone missing)")
+
         client = TwilioClientWrapper()
-        client.transfer_call(context.twilio_call_sid, ESCALATION_NUMBER)
+        client.transfer_call(context.twilio_call_sid, target_number)
         
         # 3. Update State
         context.state["transferred"] = True
         
+        # 4. Emit Tool Call Event (Fire and Forget)
+        from src.core.events.emitter import get_supabase_vapi_webhook_emitter
+        import asyncio
+        
+        if context.assistant_id_webhook:
+             emitter = get_supabase_vapi_webhook_emitter()
+             asyncio.create_task(
+                 emitter.emit_tool_call(
+                     call_id=context.call_id,
+                     assistant_id=context.assistant_id_webhook,
+                     customer_number=context.customer_number or "unknown",
+                     tool_name="transferCall",
+                     tool_args={"destination": target_number},
+                     result={"status": "transferred"}
+                 )
+             )
+
         return ToolResult.success_result(
-            data={"status": "transferred", "destination": ESCALATION_NUMBER},
+            data={"status": "transferred", "destination": target_number},
             meta={"side_effect": True}
         )
 

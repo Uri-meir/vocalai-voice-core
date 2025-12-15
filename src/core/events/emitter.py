@@ -82,6 +82,39 @@ class SupabaseVapiWebhookEmitter:
         }
         await self._emit(payload, "meeting.scheduled", call_id)
 
+    async def emit_tool_call(
+        self,
+        call_id: str,
+        assistant_id: str,
+        customer_number: str,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        result: Dict[str, Any] = None
+    ) -> None:
+        payload = {
+            "message": {
+                "type": "tool-calls",
+                "toolCalls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": tool_args
+                        },
+                        "id": "tool_call_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") # Generate a dummy ID
+                    }
+                ],
+                "call": {
+                    "id": call_id,
+                    "assistantId": assistant_id,
+                     "customer": {
+                        "number": customer_number
+                    }
+                }
+            }
+        }
+        await self._emit(payload, "tool-calls", call_id)
+
     async def emit_call_ended(
         self,
         call_id: str,

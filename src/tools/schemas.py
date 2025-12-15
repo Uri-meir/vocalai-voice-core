@@ -13,6 +13,15 @@ class ToolContext(BaseModel):
     professional_slug: str
     assistant_id_webhook: Optional[str] = None
     caller_timezone: str = "Asia/Jerusalem"
+    customer_number: Optional[str] = None
+    business_phone: Optional[str] = None
+    business_owner_name: Optional[str] = None
+    
+    # Calendar Integration
+    cal_username: Optional[str] = None
+    event_type_slug: Optional[str] = None
+    cal_api_key: Optional[str] = None
+
     # State is a mutable dictionary for lifecycle gates (e.g. transfer_initiated)
     # Using Any to avoid circular imports if we pass complex objects, but ideally dict.
     state: Dict[str, Any] = Field(default_factory=dict) 

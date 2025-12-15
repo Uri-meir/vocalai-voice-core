@@ -20,7 +20,7 @@ class SupabaseAssistantRepository(AssistantRepository):
                 return None
             
             row = response.data
-            return AssistantConfig(
+            config = AssistantConfig(
                 id=row["id"],
                 professional_slug=row["professional_slug"],
                 display_name=row["display_name"],
@@ -35,6 +35,33 @@ class SupabaseAssistantRepository(AssistantRepository):
                 background_denoising_enabled=row["background_denoising_enabled"],
                 metadata=row.get("metadata"),
             )
+            
+            # Fetch Calendar Config
+            try:
+                cal_row = self._client.table("calendar_profiles").select("*").eq("professional_slug", row["professional_slug"]).single().execute()
+                logger.info(f"📅 Calendar Profile Fetch: {cal_row.data}")
+                if cal_row.data:
+                    from src.core.assistant_config import CalendarConfig
+                    config.calendar_config = CalendarConfig(
+                        cal_username=cal_row.data.get("cal_username"),
+                        event_type_slug=cal_row.data.get("event_type_slug"),
+                        cal_api_key=cal_row.data.get("cal_api_key")
+                    )
+                
+                # Fetch Business Phone and Name (from professionals table)
+                prof_row = self._client.table("professionals").select("phone_e164, full_name").eq("professional_slug", row["professional_slug"]).single().execute()
+                if prof_row.data:
+                    config.business_phone = prof_row.data.get("phone_e164")
+                    config.business_owner_name = prof_row.data.get("full_name")
+                    logger.info(f"📱 Business Phone: {config.business_phone}, Owner: {config.business_owner_name}")
+                    
+            except Exception as cal_err:
+                logger.warning(f"⚠️ Could not fetch calendar profile for {row['professional_slug']}")
+                logger.warning(f"⚠️ Error Details: {str(cal_err)}")
+                import traceback
+                logger.warning(f"⚠️ Traceback: {traceback.format_exc()}")
+                
+            return config
         except Exception as e:
             logger.error(f"Error fetching assistant {assistant_id}: {e}")
             return None

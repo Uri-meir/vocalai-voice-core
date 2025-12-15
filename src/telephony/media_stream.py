@@ -28,6 +28,7 @@ async def media_stream(websocket: WebSocket):
     stream_sid = None
     sender_task = None
     call_session = None
+    gemini_task = None  # Initialize potentially unbound variable
     
     # Call State
     call_start_time = None
@@ -55,7 +56,6 @@ async def media_stream(websocket: WebSocket):
                 
                 # Attempt to get customer number from customParams (if passed from voice_hook)
                 # Default to "unknown" if not available (e.g. if passed directly to TwiML without params)
-                
                 customer_number = custom_params.get("customer_number", "unknown") 
 
                 logger.info(f"🏁 Stream Started: {stream_sid}, Assistant: {internal_assistant_id}")
@@ -83,8 +83,6 @@ async def media_stream(websocket: WebSocket):
                     assistant_id_webhook = internal_assistant_id # Fallback
 
                 # Append Tool Usage Optimization
-                # Force instant execution and suppress "planning" monologues
-                # Revert to simple instruction (remove Tool Rules which might be causing silence/confusion)
                 system_instruction = base_instruction
 
                 # Emit call.started
@@ -132,17 +130,23 @@ async def media_stream(websocket: WebSocket):
                 )(transfer_call_tool)
                 
                 # Create Tool Context
+                cal_config = assistant_config.calendar_config if assistant_config else None
                 tool_context = ToolContext(
                     call_id=call_id,
-                    twilio_call_sid=call_id, # Twilio sends callSid as callId usually
+                    twilio_call_sid=call_id, 
                     professional_slug=assistant_config.professional_slug if assistant_config else "unknown",
                     assistant_id_webhook=assistant_id_webhook,
                     caller_timezone=assistant_config.timezone if assistant_config else "Asia/Jerusalem",
+                    cal_username=cal_config.cal_username if cal_config else None,
+                    event_type_slug=cal_config.event_type_slug if cal_config else None,
+                    cal_api_key=cal_config.cal_api_key if cal_config else None,
+                    customer_number=customer_number,
+                    business_phone=assistant_config.business_phone if assistant_config else None,
+                    business_owner_name=assistant_config.business_owner_name if assistant_config else None,
                     state={}
                 )
 
                 # Re-Initialize Client with Tools
-                # We overwrite the initial client (which was empty)
                 client = GeminiLiveClient(
                     input_queue=mic_queue, 
                     output_queue=speaker_queue,
@@ -150,11 +154,11 @@ async def media_stream(websocket: WebSocket):
                     tool_context=tool_context
                 )
 
-                # Start Gemini Session with Configured Prompt
-                # Voice is static (defaults in client), ignoring config.voice_id as requested
+                # Start Gemini Session
                 gemini_task = asyncio.create_task(
                     client.start(
-                        system_instruction=system_instruction
+                        system_instruction=system_instruction,
+                        initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None
                     )
                 )
                 
@@ -165,18 +169,14 @@ async def media_stream(websocket: WebSocket):
                     logger.info("🚀 Starting Twilio Sender Loop")
                     try:
                         while True:
-                            # Get PCM24k/16k from Gemini
                             chunk = await speaker_queue.get()
                             if not chunk: continue
                             
-                            # Resample to 8kHz for Twilio
                             in_rate = config.get("audio.receive_sample_rate", 24000)
                             resampled = resample_audio(chunk, in_rate, 8000)
                             
-                            # Encode to mulaw
                             payload = base64.b64encode(pcm_to_mulaw(resampled)).decode("utf-8")
                             
-                            # Send to Twilio
                             if stream_sid:
                                 await websocket.send_json({
                                     "event": "media",
@@ -194,13 +194,9 @@ async def media_stream(websocket: WebSocket):
             elif event == "media":
                 payload = data.get("media", {}).get("payload")
                 if payload:
-                    # Decode Base64 -> mulaw -> PCM16 (8kHz)
                     pcm_8k = mulaw_to_pcm(base64.b64decode(payload))
-                    
-                    # Resample 8k -> 16k (SEND_SAMPLE_RATE)
                     out_rate = 16000
                     pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
-                    
                     await mic_queue.put(pcm_16k)
                     
             elif event == "stop":
@@ -227,7 +223,6 @@ async def media_stream(websocket: WebSocket):
         if call_id and assistant_id_webhook and call_start_time:
              ended_at = datetime.now(timezone.utc)
              emitter = get_supabase_vapi_webhook_emitter()
-             # Fire and forget the webhook task
              asyncio.create_task(
                  emitter.emit_call_ended(
                     call_id=call_id,
@@ -235,8 +230,8 @@ async def media_stream(websocket: WebSocket):
                     customer_number=customer_number or "unknown",
                     created_at=call_start_time,
                     ended_at=ended_at,
-                    transcript="Transcript not available yet", # Placeholder
-                    ended_reason="completed" # Simplified
+                    transcript="Transcript not available yet",
+                    ended_reason="completed"
                 )
              )
         

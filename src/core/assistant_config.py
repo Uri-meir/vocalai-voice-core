@@ -1,6 +1,11 @@
 from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 
+class CalendarConfig(BaseModel):
+    cal_username: Optional[str] = None
+    event_type_slug: Optional[str] = None
+    cal_api_key: Optional[str] = None
+
 class AssistantConfig(BaseModel):
     """
     Configuration for a voice assistant.
@@ -18,6 +23,9 @@ class AssistantConfig(BaseModel):
     silence_timeout_seconds: int = 60
     background_denoising_enabled: bool = True
     metadata: Optional[Dict[str, Any]] = None
+    calendar_config: Optional[CalendarConfig] = None
+    business_phone: Optional[str] = None
+    business_owner_name: Optional[str] = None
 
     @classmethod
     def from_vapi_payload(cls, payload: Dict[str, Any]) -> "AssistantConfig":
