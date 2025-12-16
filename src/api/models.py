@@ -8,6 +8,7 @@ class StartCallRequest(BaseModel):
     customer: CustomerData
     assistantId: str = Field(..., alias="assistantId") 
     phoneNumberId: Optional[str] = None
+    twilioPhoneNumber: Optional[str] = None
 
     @property
     def to(self) -> str:

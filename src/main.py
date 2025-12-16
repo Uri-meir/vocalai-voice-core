@@ -36,6 +36,16 @@ from fastapi import HTTPException
 from src.api.models import StartCallRequest
 from src.core.assistants_repository_factory import get_assistant_repository
 
+@app.get("/debug-logs")
+async def debug_logs():
+    """Endpoint to verify deployment and test logging."""
+    import time
+    ts = time.time()
+    msg = f"🔍 DEBUG LOG TEST - Timestamp: {ts}"
+    print(f"PRINT: {msg}", flush=True)
+    logger.info(f"LOGGER: {msg}")
+    return {"message": "Logged successfully", "timestamp": ts, "version": "v1-unbuffered-check"}
+
 @app.post("/call/start")
 async def start_call(payload: StartCallRequest):
     """Initiate an outbound call."""
@@ -48,8 +58,19 @@ async def start_call(payload: StartCallRequest):
          logger.error(f"❌ Assistant {payload.assistant_id} not found")
          raise HTTPException(status_code=404, detail="Assistant configuration not found")
 
+    # Resolve Outbound Phone Number (Caller ID)
+    # We use the explicit number from payload if provided (dynamic caller ID)
+    from_number = payload.twilioPhoneNumber
+    if from_number:
+        logger.info(f"📞 Using Dynamic Caller ID from payload: {from_number}")
+
     client = TwilioClientWrapper()
-    sid = client.make_call(payload.to, payload.assistant_id, customer_number=payload.to)
+    sid = client.make_call(
+        to=payload.to, 
+        assistant_id=payload.assistant_id, 
+        customer_number=payload.to,
+        from_number=from_number
+    )
     return {"call_sid": sid, "status": "initiated", "assistant_id": payload.assistant_id}
 
 if __name__ == "__main__":
