@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI
 app = FastAPI(title="Gemini Telephony Server")
 
+# Setup CORS (Critical for WebSockets behind App Runner LB)
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include Routers
 app.include_router(voice_router, prefix="/twilio")
 app.include_router(inbound_router, prefix="/twilio")
