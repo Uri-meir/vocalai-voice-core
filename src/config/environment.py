@@ -4,7 +4,8 @@ import yaml
 from dotenv import load_dotenv
 
 # Load .env file for secrets
-load_dotenv()
+# Load .env file for secrets (Override ensures local .env takes precedence over shell vars)
+load_dotenv(override=True)
 
 class ConfigManager:
     _config = None
@@ -43,6 +44,7 @@ class ConfigManager:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
     GEMINI_VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Puck")
+    N8N_WEBHOOK_URL_DTC = os.getenv("N8N_WEBHOOK_URL_DTC")
 
     @property
     def GEMINI_MODEL_ID(self):

@@ -23,13 +23,29 @@ class GeminiLiveClient:
         self.tool_context = tool_context
         self.session = None
 
-    async def start(self, system_instruction: str = None, initial_text: str = None):
+    async def start(self, system_instruction: str = None, initial_text: str = None, voice_name: str = None, temperature: float = None):
         """Connects to Gemini Live and starts send/receive loops."""
         config_params = {
             "generation_config": {
                 "response_modalities": ["AUDIO"],
             }
         }
+
+        # Apply Temperature if provided
+        if temperature is not None:
+            config_params["generation_config"]["temperature"] = temperature
+
+        # Apply Voice Config if provided
+        if voice_name:
+            # Check if speech_config already exists or needs to be created
+            if "speech_config" not in config_params["generation_config"]:
+                 config_params["generation_config"]["speech_config"] = {}
+            
+            config_params["generation_config"]["speech_config"]["voice_config"] = {
+                "prebuilt_voice_config": {
+                    "voice_name": voice_name
+                }
+            }
         
         # Inject Tools if available
         if self.tool_registry:
@@ -85,6 +101,14 @@ class GeminiLiveClient:
         if self.session:
             await self.session.send(input=text, end_of_turn=True)
             logger.info(f"📤 Sent text to Gemini: {text}")
+
+    async def interrupt(self):
+        """Interrupts the model generation explicitly."""
+        if self.session:
+            # Sending an empty text message with end_of_turn=True effectively stops generation
+            # and invalidates the previous turn in most LLM realtime contexts.
+            await self.session.send(input=" ", end_of_turn=True)
+            logger.info("🛑 Sent Interrupt Signal to Gemini")
 
     async def _send_loop(self):
         """Continously reads from input queue and sends audio to Gemini."""

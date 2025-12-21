@@ -4,10 +4,40 @@ audio:
   channels: 1
   chunk_size_vad: 480
   chunk_size_default: 1024
-
+# 1-3 when 3 is the most agressive ( sensitive to noise )
 vad:
-  enabled: false
-  mode: 3
+  enabled: true
+  barge_in_enabled: true 
+  backend: "silero"
+
+  # Silero Specifics
+  silero_model_path: "src/audio/models/silero_vad.onnx"
+  silero_sample_rate: 8000
+  silero_frame_ms: 32
+  silero_threshold: 0.2  # More sensitive for instant response (was 0.3)
+  silero_echo_threshold: 0.75
+  silero_min_speech_ms: 32  # Faster trigger - 32ms instead of 64ms
+
+  # ONNX Performance
+  onnx_intra_op_threads: 1
+  onnx_inter_op_threads: 1
+
+  # Dual-Gate Logic
+  snr_factor: 2.5
+  noise_floor_window_ms: 1500
+  update_noise_floor_in_echo_guard: false
+  freeze_noise_floor_while_speaking: true
+
+  # Legacy / Flow
+  echo_guard_ms: 150
+  echo_guard_extra_frames: 0  # Instant during bot speech (was 2)
+  barge_in_cooldown_ms: 400
+  end_silence_ms: 300
+  
+  # Base params (kept for reference or fallback logic)
+  sample_rate: 8000
+  frame_ms: 32 # Unified to match Silero requirement
+  speech_start_frames: 2 # ~64ms derived from 32ms frames
 
 gemini:
   model_id: "gemini-2.5-flash-native-audio-preview-12-2025"

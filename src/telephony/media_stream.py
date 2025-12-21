@@ -6,6 +6,7 @@ import asyncio
 from src.telephony.audio_utils import mulaw_to_pcm, pcm_to_mulaw, resample_audio
 from src.gemini.client import GeminiLiveClient
 from src.config.environment import config
+import time
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -18,8 +19,9 @@ from datetime import datetime, timezone
 @router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
     """Handle Twilio Media Stream WebSocket and Bridge to Gemini."""
+    logger.info(f"🔌 WS CONNECT /twilio/media-stream headers={dict(websocket.headers)}")
     await websocket.accept()
-    logger.info("🔌 Twilio Media Stream Connected")
+    logger.info("✅ WS ACCEPTED")
     
     # queues for bridging
     mic_queue = asyncio.Queue()     # Twilio -> Gemini
@@ -28,12 +30,33 @@ async def media_stream(websocket: WebSocket):
     stream_sid = None
     sender_task = None
     call_session = None
-    gemini_task = None  # Initialize potentially unbound variable
+    gemini_task = None
+    
+    # Barge-In State
+    from src.audio.vad import VoiceActivityDetector, VADState
+    vad_wrapper = VoiceActivityDetector()
+    barge_in_enabled = config.get("vad.barge_in_enabled", True)
+    echo_guard_ms = config.get("vad.echo_guard_ms", 150)
+    
+    # State Machine
+    state = "LISTENING"
+    last_tts_send_ts = 0
+    
+    # Helper for fire-and-forget clear messages
+    async def safe_send_clear():
+        try:
+            if stream_sid:
+                await websocket.send_json({
+                    "event": "clear",
+                    "streamSid": stream_sid
+                })
+        except:
+            pass
     
     # Call State
     call_start_time = None
     call_id = None
-    assistant_id_webhook = None # ID to send to webhook
+    assistant_id_webhook = None
     customer_number = None
 
     try:
@@ -146,6 +169,9 @@ async def media_stream(websocket: WebSocket):
                     state={}
                 )
 
+                # Reset VAD State
+                vad_wrapper.reset()
+                
                 # Re-Initialize Client with Tools
                 client = GeminiLiveClient(
                     input_queue=mic_queue, 
@@ -154,11 +180,22 @@ async def media_stream(websocket: WebSocket):
                     tool_context=tool_context
                 )
 
+                # Resolve Voice Name
+                ALLOWED_VOICES = ["Puck", "Charon", "Aoede", "Fenrir", "Kore"]
+                desired_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else None
+                
+                # Validation: Fallback to None (Default) if invalid
+                final_voice = desired_voice if desired_voice in ALLOWED_VOICES else None
+                if desired_voice and final_voice is None:
+                    logger.warning(f"⚠️ Invalid voice_id '{desired_voice}'. Falling back to default.")
+
                 # Start Gemini Session
                 gemini_task = asyncio.create_task(
                     client.start(
                         system_instruction=system_instruction,
-                        initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None
+                        initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None,
+                        voice_name=final_voice,
+                        temperature=0.4  # Default creativity
                     )
                 )
                 
@@ -166,12 +203,14 @@ async def media_stream(websocket: WebSocket):
 
                 # Start Outbound Sender
                 async def send_audio_to_twilio():
+                    nonlocal state, last_tts_send_ts
                     logger.info("🚀 Starting Twilio Sender Loop")
                     try:
                         while True:
                             chunk = await speaker_queue.get()
                             if not chunk: continue
                             
+                            state = "SPEAKING"
                             in_rate = config.get("audio.receive_sample_rate", 24000)
                             resampled = resample_audio(chunk, in_rate, 8000)
                             
@@ -183,6 +222,7 @@ async def media_stream(websocket: WebSocket):
                                     "streamSid": stream_sid,
                                     "media": {"payload": payload}
                                 })
+                                last_tts_send_ts = time.time() * 1000
                                 
                     except Exception as e:
                         logger.error(f"❌ Error sending to Twilio: {e}", exc_info=True)
@@ -195,6 +235,41 @@ async def media_stream(websocket: WebSocket):
                 payload = data.get("media", {}).get("payload")
                 if payload:
                     pcm_8k = mulaw_to_pcm(base64.b64decode(payload))
+                    
+                    # Barge-In Processing
+                    if barge_in_enabled and vad_wrapper.enabled:
+                        try:
+                            # Echo Guard
+                            now_ms = time.time() * 1000
+                            is_in_echo_guard = False
+                            if state == "SPEAKING" and (now_ms - last_tts_send_ts < echo_guard_ms):
+                                is_in_echo_guard = True
+                            
+                            # VAD Processing
+                            vad_state = vad_wrapper.process_chunk(pcm_8k, is_echo_guard_active=is_in_echo_guard)
+                            
+                            if vad_state == VADState.START:
+                                logger.info("🛑 Barge-In Triggered")
+                                state = "INTERRUPTING"
+                                
+                                # Clear speaker queue
+                                while not speaker_queue.empty():
+                                    try: speaker_queue.get_nowait()
+                                    except: break
+                                
+                                # Clear Twilio buffer
+                                asyncio.create_task(safe_send_clear())
+                                
+                                # Interrupt Gemini
+                                if hasattr(client, 'interrupt'):
+                                    asyncio.create_task(client.interrupt())
+                                else:
+                                    asyncio.create_task(client.send_text(" "))
+                                    
+                        except Exception as e:
+                             logger.error(f"VAD Error: {e}", exc_info=True)
+                    
+                    # Forward audio to Gemini
                     out_rate = 16000
                     pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
                     await mic_queue.put(pcm_16k)

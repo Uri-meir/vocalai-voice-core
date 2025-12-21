@@ -2,10 +2,12 @@ google-genai
 pyaudio
 python-dotenv
 colorlog
-webrtcvad-wheels
+onnxruntime
 PyYAML
 fastapi
 uvicorn[standard]
 twilio
 python-multipart
 supabase
+soxr
+numpy
