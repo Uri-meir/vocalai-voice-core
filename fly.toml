@@ -15,4 +15,4 @@ primary_region = "iad"
     soft_limit = 5   # Ideal load
     hard_limit = 10  # strict cap
 [[vm]]
-  size = "shared-cpu-1x"
+  size = "shared-cpu-2x"  # Upgraded to 512MB RAM (was 256MB)

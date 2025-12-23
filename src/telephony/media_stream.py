@@ -129,17 +129,34 @@ async def media_stream(websocket: WebSocket):
 
                 tool_registry = ToolRegistry()
                 
+                cal_config = assistant_config.calendar_config if assistant_config else None
+                services = cal_config.services if cal_config and cal_config.services else []
+
+                # Dynamic Tool Description
+                get_slots_desc = "Checks calendar availability."
+                book_appt_desc = "Books an appointment."
+
+                if services:
+                    service_lines = [f"- {s.name} ({s.duration} mins)" for s in services]
+                    service_info = "\nAvailable Services:\n" + "\n".join(service_lines) + "\nPlease providing 'duration_minutes' or 'service_name' to select the correct service."
+                    
+                    get_slots_desc += service_info
+                    book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result). " + service_info
+                else:
+                    get_slots_desc += " Arguments: 'requestedAppointment' (ISO string). Returns list of slots."
+                    book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result)."
+
                 # Register Scheduling Tools
                 tool_registry.register(
                     name="getOpenSlots",
-                    description="Checks calendar availability. Arguments: 'requestedAppointment' (ISO string like '2024-12-25T10:00:00+02:00'). Returns list of slots.",
+                    description=get_slots_desc,
                     args_model=GetOpenSlotsArgs,
                     side_effect=False
                 )(get_open_slots_tool)
 
                 tool_registry.register(
                     name="bookAppointment",
-                    description="Books an appointment. REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result).",
+                    description=book_appt_desc,
                     args_model=BookAppointmentArgs,
                     side_effect=True
                 )(book_appointment_tool)
@@ -153,7 +170,6 @@ async def media_stream(websocket: WebSocket):
                 )(transfer_call_tool)
                 
                 # Create Tool Context
-                cal_config = assistant_config.calendar_config if assistant_config else None
                 tool_context = ToolContext(
                     call_id=call_id,
                     twilio_call_sid=call_id, 
@@ -163,6 +179,8 @@ async def media_stream(websocket: WebSocket):
                     cal_username=cal_config.cal_username if cal_config else None,
                     event_type_slug=cal_config.event_type_slug if cal_config else None,
                     cal_api_key=cal_config.cal_api_key if cal_config else None,
+                    services=[s.dict() for s in services], # Pass as dicts
+                    event_types_by_duration=cal_config.event_types_by_duration if cal_config else {},
                     customer_number=customer_number,
                     business_phone=assistant_config.business_phone if assistant_config else None,
                     business_owner_name=assistant_config.business_owner_name if assistant_config else None,

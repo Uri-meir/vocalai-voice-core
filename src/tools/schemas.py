@@ -21,6 +21,8 @@ class ToolContext(BaseModel):
     cal_username: Optional[str] = None
     event_type_slug: Optional[str] = None
     cal_api_key: Optional[str] = None
+    services: List[Dict[str, Any]] = Field(default_factory=list) # List of valid ServiceConfig dicts
+    event_types_by_duration: Dict[str, Dict[str, str]] = Field(default_factory=dict) # Duration map
 
     # State is a mutable dictionary for lifecycle gates (e.g. transfer_initiated)
     # Using Any to avoid circular imports if we pass complex objects, but ideally dict.
@@ -59,11 +61,17 @@ class ToolResult(BaseModel):
 class GetOpenSlotsArgs(BaseModel):
     callerTimezone: str = Field(..., description="IANA timezone such as 'Asia/Jerusalem'.")
     requestedAppointment: str = Field(..., description="Appointment time in ISO 8601 with offset, e.g. '2025-12-08T14:00:00+02:00'.")
+    event_type_slug: Optional[str] = Field(None, description="Specific service ID if known.")
+    duration_minutes: Optional[int] = Field(None, description="Duration in minutes to look for.")
+    service_name: Optional[str] = Field(None, description="Fuzzy match for the service name.")
 
 class BookAppointmentArgs(BaseModel):
     name: str = Field(..., description="Caller full name.")
     callerTimezone: str = Field(..., description="IANA timezone such as 'Asia/Jerusalem'.")
     requestedAppointment: str = Field(..., description="Appointment time in ISO 8601 with offset, e.g. '2025-12-08T11:30:00+02:00'.")
+    event_type_slug: Optional[str] = Field(None, description="Specific service ID if known.")
+    duration_minutes: Optional[int] = Field(None, description="Duration in minutes to book.")
+    service_name: Optional[str] = Field(None, description="Fuzzy match for the service name.")
 
 class TransferCallArgs(BaseModel):
     pass

@@ -1,10 +1,16 @@
 from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 
+class ServiceConfig(BaseModel):
+    name: str
+    duration: int
+
 class CalendarConfig(BaseModel):
     cal_username: Optional[str] = None
     event_type_slug: Optional[str] = None
     cal_api_key: Optional[str] = None
+    services: List[ServiceConfig] = Field(default_factory=list)
+    event_types_by_duration: Dict[str, Dict[str, str]] = Field(default_factory=dict)
 
 class AssistantConfig(BaseModel):
     """

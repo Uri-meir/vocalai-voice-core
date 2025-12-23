@@ -6,8 +6,8 @@ audio:
   chunk_size_default: 1024
 # 1-3 when 3 is the most agressive ( sensitive to noise )
 vad:
-  enabled: true
-  barge_in_enabled: true 
+  enabled: false
+  barge_in_enabled: false 
   backend: "silero"
 
   # Silero Specifics

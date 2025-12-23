@@ -41,11 +41,25 @@ class SupabaseAssistantRepository(AssistantRepository):
                 cal_row = self._client.table("calendar_profiles").select("*").eq("professional_slug", row["professional_slug"]).single().execute()
                 logger.info(f"📅 Calendar Profile Fetch: {cal_row.data}")
                 if cal_row.data:
-                    from src.core.assistant_config import CalendarConfig
+                    from src.core.assistant_config import CalendarConfig, ServiceConfig
+                    
+                    services_data = cal_row.data.get("services", [])
+                    services_list = []
+                    if isinstance(services_data, list):
+                        for s in services_data:
+                            try:
+                                services_list.append(ServiceConfig(**s))
+                            except Exception as e:
+                                logger.error(f"Failed to parse service config: {s}, error: {e}")
+
+                    event_types_map = cal_row.data.get("event_types_by_duration", {})
+                    
                     config.calendar_config = CalendarConfig(
                         cal_username=cal_row.data.get("cal_username"),
                         event_type_slug=cal_row.data.get("event_type_slug"),
-                        cal_api_key=cal_row.data.get("cal_api_key")
+                        cal_api_key=cal_row.data.get("cal_api_key"),
+                        services=services_list,
+                        event_types_by_duration=event_types_map
                     )
                 
                 # Fetch Business Phone and Name (from professionals table)
