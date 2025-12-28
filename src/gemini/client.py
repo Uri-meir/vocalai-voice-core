@@ -45,12 +45,18 @@ class GeminiLiveClient:
         
         # Watchdog state
         self.playout_until = 0.0  # Monotonic timestamp when audio playback should finish
+        self.playout_started_at = 0.0  # Monotonic timestamp when FIRST chunk of turn is sent (for barge-in grace period)
         self.gemini_has_spoken_this_turn = False  # Track if Gemini actually spoke (not just committed)
         self.silence_accumulator_s = 0.0  # Accumulate actual silence (only increments when silent)
         self.nudge_count_this_turn = 0  # Limit nudges per Gemini turn
         self.max_nudges_per_turn = 2  # Max nudges before giving up
         self.silence_timeout_s = config.get("watchdog.silence_timeout_ms", 6000) / 1000.0
         self.watchdog_task = None  # Watchdog loop task
+        
+        # Transcript tracking (for call logging)
+        self.current_turn_transcript = []  # Accumulate assistant transcript chunks for current turn
+        self.current_user_transcript = []  # Accumulate user transcript chunks for current turn
+        self.transcript_log = []  # Full conversation transcript
 
     def mark_model_activity(self):
         """Update last model activity timestamp (for watchdog later)."""
@@ -109,6 +115,19 @@ class GeminiLiveClient:
     def transition_to_gemini(self, reason=""):
         """Switch to GEMINI state (commit)."""
         old_state = self.turn_state.value if self.turn_state else "none"
+        
+        # Save accumulated user transcript before transitioning
+        full_user_transcript = "".join(self.current_user_transcript)
+        if full_user_transcript:
+            self.transcript_log.append({
+                "turn_id": len(self.transcript_log) + 1,
+                "speaker": "user",
+                "timestamp": time.time(),
+                "text": full_user_transcript
+            })
+            logger.info(f"💾 User transcript (full turn): {full_user_transcript[:100]}...")
+        self.current_user_transcript = []  # Reset for next turn
+        
         self.turn_state = TurnState.GEMINI
         self.mark_model_activity()  # Update activity timestamp
         self.nudge_count_this_turn = 0  # Reset nudge counter for new turn
@@ -133,10 +152,15 @@ class GeminiLiveClient:
     async def start(self, system_instruction: str = None, initial_text: str = None, voice_name: str = None, temperature: float = None):
         """Connects to Gemini Live and starts send/receive loops."""
         config_params = {
-            "generation_config": {
-                "response_modalities": ["AUDIO"],
-            }
+            "response_modalities": ["AUDIO"],
+            "generation_config": {}
         }
+        
+        # Enable transcription if configured
+        if config.get("gemini.enable_transcription", False):
+            config_params["output_audio_transcription"] = {}
+            config_params["input_audio_transcription"] = {}
+            logger.info("📝 Transcription enabled for this session (input + output)")
 
         # Apply Temperature if provided
         if temperature is not None:
@@ -144,13 +168,11 @@ class GeminiLiveClient:
 
         # Apply Voice Config if provided
         if voice_name:
-            # Check if speech_config already exists or needs to be created
-            if "speech_config" not in config_params["generation_config"]:
-                 config_params["generation_config"]["speech_config"] = {}
-            
-            config_params["generation_config"]["speech_config"]["voice_config"] = {
-                "prebuilt_voice_config": {
-                    "voice_name": voice_name
+            config_params["speech_config"] = {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": voice_name
+                    }
                 }
             }
         
@@ -346,8 +368,33 @@ class GeminiLiveClient:
                         if response.tool_call and response.tool_call.function_calls:
                             self.mark_model_activity()
                     
+                    # === Capture Input Transcription (User Speech) ===
+                    if response.server_content and response.server_content.input_transcription:
+                        user_text = response.server_content.input_transcription.text
+                        # Accumulate user transcript chunks (consolidated on turn transition)
+                        self.current_user_transcript.append(user_text)
+                        logger.debug(f"📝 User transcript chunk: {user_text[:50]}...")
+                    
+                    # === Capture Output Transcription (Bot Speech) ===
+                    if response.server_content and response.server_content.output_transcription:
+                        transcript_text = response.server_content.output_transcription.text
+                        self.current_turn_transcript.append(transcript_text)
+                        logger.debug(f"📝 Assistant transcript chunk: {transcript_text[:50]}...")
+                    
                     # Handle turn_complete
                     if response.server_content and response.server_content.turn_complete:
+                        # Save accumulated transcript before transitioning
+                        full_transcript = "".join(self.current_turn_transcript)
+                        if full_transcript:
+                            self.transcript_log.append({
+                                "turn_id": len(self.transcript_log) + 1,
+                                "speaker": "assistant",
+                                "timestamp": time.time(),
+                                "text": full_transcript
+                            })
+                            logger.info(f"💾 Assistant transcript: {full_transcript[:100]}...")
+                        self.current_turn_transcript = []  # Reset for next turn
+                        
                         logger.info("✅ Gemini turn_complete received")
                         self.transition_to_user(reason="turn_complete")
                     if response.tool_call:

@@ -32,6 +32,7 @@ async def media_stream(websocket: WebSocket):
     sender_task = None
     call_session = None
     gemini_task = None
+    client = None
     
     # Barge-In State
     from src.audio.vad import VoiceActivityDetector, VADState
@@ -52,6 +53,12 @@ async def media_stream(websocket: WebSocket):
     rms_voice_mode = False  # Hysteresis latch
     last_burst_log_time = 0.0  # For throttled logging
     last_burst_reset_time = 0.0  # Cooldown to prevent spam resets
+    
+    # Barge-in state (turn-aware interruption)
+    last_barge_in_at = 0.0  # Global cooldown for both VAD and RMS triggers
+    ignore_speaker_audio_until = 0.0  # Prevent tail-audio leakage after barge-in
+    rms_barge_in_accum_ms = 0.0  # Separate accumulator for barge-in (independent from silence RMS)
+    last_barge_in_frame_ts = None  # Separate timestamp for barge-in dt calculation
     
     # Helper for fire-and-forget clear messages
     async def safe_send_clear():
@@ -241,12 +248,18 @@ async def media_stream(websocket: WebSocket):
 
                 # Start Outbound Sender
                 async def send_audio_to_twilio():
-                    nonlocal state, last_tts_send_ts
+                    nonlocal state, last_tts_send_ts, ignore_speaker_audio_until
                     logger.info("🚀 Starting Twilio Sender Loop")
                     try:
                         while True:
                             chunk = await speaker_queue.get()
                             if not chunk: continue
+                            
+                            # Tail-audio suppression: Ignore chunks after barge-in to prevent Gemini leakage
+                            now = time.monotonic()
+                            if now < ignore_speaker_audio_until:
+                                logger.debug(f"🚫 Ignoring speaker audio (tail-audio suppression for {ignore_speaker_audio_until - now:.2f}s)")
+                                continue
                             
                             state = "SPEAKING"
                             in_rate = config.get("audio.receive_sample_rate", 24000)
@@ -272,9 +285,13 @@ async def media_stream(websocket: WebSocket):
                                     # Extend playout window (handles bursty delivery)
                                     client.playout_until = max(client.playout_until, now) + duration_s + 0.2
                                     
-                                    # Mark that Gemini has spoken
+                                    # Track playout start ONCE per turn (for barge-in grace period)
+                                    # CRITICAL: Set only on first chunk, not every chunk!
                                     if not client.gemini_has_spoken_this_turn:
-                                        logger.info(f"🎯 Gemini has spoken this turn (first audio, duration={duration_s:.2f}s)")
+                                        client.playout_started_at = now
+                                        logger.info(f"🎯 Gemini has spoken this turn (first audio, duration={duration_s:.2f}s, playout_started_at={now:.2f})")
+                                    
+                                    # Mark that Gemini has spoken
                                     client.gemini_has_spoken_this_turn = True
                                     
                                     logger.debug(
@@ -309,14 +326,21 @@ async def media_stream(websocket: WebSocket):
                         dt_ms = max(0.0, (now - last_frame_ts) * 1000.0)
                     last_frame_ts = now
                     
+                    # Load barge-in config (must be before VAD try block so always defined)
+                    from src.gemini.client import TurnState
+                    grace_period_s = config.get("vad.barge_in_grace_period_ms", 200) / 1000.0
+                    cooldown_s = config.get("vad.barge_in_cooldown_ms", 400) / 1000.0
+                    respect_echo_guard = config.get("vad.barge_in_respect_echo_guard", True)
+                    
+                    # Echo guard check (must be before VAD block so always defined)
+                    now_ms = time.time() * 1000
+                    is_in_echo_guard = False
+                    if state == "SPEAKING" and (now_ms - last_tts_send_ts < echo_guard_ms):
+                        is_in_echo_guard = True
+                    
                     # === 2. VAD Processing ===
                     if vad_wrapper.enabled:
                         try:
-                            # Echo guard check
-                            now_ms = time.time() * 1000
-                            is_in_echo_guard = False
-                            if state == "SPEAKING" and (now_ms - last_tts_send_ts < echo_guard_ms):
-                                is_in_echo_guard = True
                             
                             vad_state = vad_wrapper.process_chunk(pcm_8k, is_echo_guard_active=is_in_echo_guard)
                             
@@ -342,10 +366,47 @@ async def media_stream(websocket: WebSocket):
                                 if user_spoke_this_turn:
                                     user_spoke_this_turn = False
                             
-                            # Barge-in handling (existing behavior)
-                            if barge_in_enabled and vad_state == VADState.START:
-                                logger.info("🛑 Barge-In Triggered")
-                                state = "INTERRUPTING"
+                            # === Barge-in detection (VAD trigger - turn-aware) ===
+                            # (Config loaded above, before VAD try block)
+                            
+                            # === GATING (turn-aware) ===
+                            barge_in_vad_trigger = False
+                            
+                            if not barge_in_enabled:
+                                # Gate 1: Is barge-in enabled?
+                                pass  # Skip entire barge-in section
+                                
+                            elif client.turn_state != TurnState.GEMINI:
+                                # Gate 2: Are we in GEMINI turn?
+                                pass  # Only during bot speech
+                                
+                            elif now >= client.playout_until:
+                                # Gate 3a: Is audio still playing?
+                                pass  # Audio already finished
+                                
+                            elif now - client.playout_started_at < grace_period_s:
+                                # Gate 3b: Are we past the grace period?
+                                pass  # Too early (first 200ms)
+                                
+                            elif respect_echo_guard and is_in_echo_guard:
+                                # Gate 4: Respect echo guard?
+                                pass  # During echo guard window
+                                
+                            elif now - last_barge_in_at < cooldown_s:
+                                # Gate 5: Global cooldown
+                                pass  # Too soon after last barge-in
+                                
+                            elif vad_state == VADState.START:
+                                # === ALL GATES PASSED - VAD START triggers barge-in ===
+                                barge_in_vad_trigger = True
+                            
+                            # Execute barge-in if triggered
+                            if barge_in_vad_trigger:
+                                logger.warning(
+                                    f"🛑 BARGE-IN (VAD) | Playout elapsed: {now - client.playout_started_at:.2f}s | "
+                                    f"Remaining: {client.playout_until - now:.2f}s | "
+                                    f"Silence level was: {client.user_silence_warning_level}"
+                                )
                                 
                                 # Clear speaker queue
                                 while not speaker_queue.empty():
@@ -358,8 +419,17 @@ async def media_stream(websocket: WebSocket):
                                 # Interrupt Gemini
                                 if hasattr(client, 'interrupt'):
                                     asyncio.create_task(client.interrupt())
-                                else:
-                                    asyncio.create_task(client.send_text(" "))
+                                
+                                # Set tail-audio ignore window (300ms)
+                                tail_ignore_s = config.get("vad.barge_in_tail_ignore_ms", 300) / 1000.0
+                                ignore_speaker_audio_until = now + tail_ignore_s
+                                
+                                # Transition to USER turn (integrates with silence mechanism)
+                                client.transition_to_user("barge-in")
+                                client.user_silence_warning_level = 0  # Reset escalation (user is engaged!)
+                                
+                                # Update global cooldown
+                                last_barge_in_at = now
                                 
                         except Exception as e:
                             logger.error(f"VAD Error: {e}", exc_info=True)
@@ -438,6 +508,73 @@ async def media_stream(websocket: WebSocket):
                             # Require burst AND (recent_vad_start OR speech_like_crest_factor)
                             # This would further reduce false positives in extreme noise
                     
+                    # === 3b. RMS Burst Barge-In (dual-gate alternative to VAD) ===
+                    use_rms_barge_in = not config.get("vad.barge_in_vad_only", False)
+                    rms_burst_threshold = config.get("vad.barge_in_rms_burst_ms", 100)
+                    
+                    # Only accumulate RMS burst when ALL barge-in gates pass
+                    # This prevents false accumulation during echo guard, grace period, etc.
+                    if not barge_in_enabled:
+                        rms_barge_in_accum_ms = 0.0
+                    elif not use_rms_barge_in:
+                        rms_barge_in_accum_ms = 0.0
+                    elif client.turn_state != TurnState.GEMINI:
+                        rms_barge_in_accum_ms = 0.0
+                    elif now >= client.playout_until:
+                        rms_barge_in_accum_ms = 0.0
+                    elif now - client.playout_started_at < grace_period_s:
+                        rms_barge_in_accum_ms = 0.0
+                    elif respect_echo_guard and is_in_echo_guard:
+                        rms_barge_in_accum_ms = 0.0
+                    elif now - last_barge_in_at < cooldown_s:
+                        rms_barge_in_accum_ms = 0.0
+                    else:
+                        # All gates passed - safe to accumulate RMS for barge-in
+                        # Use separate timestamp to avoid conflicts with silence RMS dt
+                        dt_barge_ms = 20.0 if last_barge_in_frame_ts is None else max(0.0, (now - last_barge_in_frame_ts) * 1000.0)
+                        last_barge_in_frame_ts = now
+                        
+                        # Same voice detection as silence mechanism
+                        if noise_floor_rms is None:
+                            voice_candidate_barge = False
+                        else:
+                            SNR_HIGH_BARGE = config.get("turn.user_silence_snr_high", 1.5)
+                            snr_thr_barge = SNR_HIGH_BARGE  # Use high threshold for barge-in (no hysteresis)
+                            MIN_RMS_BARGE = config.get("turn.rms_absolute_minimum", 250)
+                            voice_candidate_barge = (rms > MIN_RMS_BARGE) and (rms > noise_floor_rms * snr_thr_barge)
+                        
+                        if voice_candidate_barge:
+                            rms_barge_in_accum_ms = min(400.0, rms_barge_in_accum_ms + dt_barge_ms)
+                        else:
+                            # Decay quickly (no hysteresis for barge-in)
+                            rms_barge_in_accum_ms *= 0.5
+                        
+                        # Check if threshold reached
+                        if rms_barge_in_accum_ms >= rms_burst_threshold:
+                            snr = rms / noise_floor_rms if noise_floor_rms and noise_floor_rms > 0 else 0
+                            logger.warning(
+                                f"🛑 BARGE-IN (RMS) | Burst: {rms_barge_in_accum_ms:.0f}ms | "
+                                f"RMS: {rms:.0f} | SNR: {snr:.2f}x | "
+                                f"Silence level was: {client.user_silence_warning_level}"
+                            )
+                            
+                            # Same interrupt logic as VAD barge-in
+                            while not speaker_queue.empty():
+                                try: speaker_queue.get_nowait()
+                                except: break
+                            asyncio.create_task(safe_send_clear())
+                            if hasattr(client, 'interrupt'):
+                                asyncio.create_task(client.interrupt())
+                            
+                            tail_ignore_s = config.get("vad.barge_in_tail_ignore_ms", 300) / 1000.0
+                            ignore_speaker_audio_until = now + tail_ignore_s
+                            
+                            client.transition_to_user("barge-in-rms")
+                            client.user_silence_warning_level = 0  # Reset escalation
+                            
+                            last_barge_in_at = now
+                            rms_barge_in_accum_ms = 0.0
+                    
                     # === 4. Update Noise Floor ===
                     # Update noise floor only during confirmed silence
                     should_update_noise_floor = (
@@ -480,6 +617,12 @@ async def media_stream(websocket: WebSocket):
         # Emit call.ended
         if call_id and assistant_id_webhook and call_start_time:
              ended_at = datetime.now(timezone.utc)
+             
+             # Prepare transcript (JSON string)
+             transcript_str = ""
+             if client and client.transcript_log:
+                 transcript_str = json.dumps(client.transcript_log, ensure_ascii=False)
+             
              emitter = get_supabase_vapi_webhook_emitter()
              asyncio.create_task(
                  emitter.emit_call_ended(
@@ -488,7 +631,7 @@ async def media_stream(websocket: WebSocket):
                     customer_number=customer_number or "unknown",
                     created_at=call_start_time,
                     ended_at=ended_at,
-                    transcript="Transcript not available yet",
+                    transcript=transcript_str,
                     ended_reason="completed"
                 )
              )

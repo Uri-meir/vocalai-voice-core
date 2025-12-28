@@ -32,8 +32,15 @@ vad:
   # Legacy / Flow
   echo_guard_ms: 150
   echo_guard_extra_frames: 0  # Instant during bot speech (was 2)
-  barge_in_cooldown_ms: 400
   end_silence_ms: 700  # Increased from 300ms - allows longer pauses between sentences without ending speech
+  
+  # Barge-in (turn-aware interruption)
+  barge_in_vad_only: false  # false = use dual-gate (VAD + RMS), true = VAD only
+  barge_in_rms_burst_ms: 140  # Require 100ms burst (less than 160ms silence reset)
+  barge_in_cooldown_ms: 600  # Global cooldown - prevent multiple interrupts (VAD + RMS)
+  barge_in_respect_echo_guard: true  # Disable during echo guard window
+  barge_in_grace_period_ms: 250  # Don't allow interrupting first 200ms of playout
+  barge_in_tail_ignore_ms: 400  # Ignore speaker audio for 300ms after barge-in (prevents leakage)
   
   # Base params (kept for reference or fallback logic)
   sample_rate: 8000
@@ -66,6 +73,7 @@ gemini:
   voice_name: "Aoede"
   temperature: 0.4
   greeting_text: "שלום שמי שיר, מהמרפאה של אורי מאיר. כיצד אוכל לסייע ?"
+  enable_transcription: true  # Enable audio transcription for call logging
 
 watchdog:
   silence_timeout_ms: 6000  # 6 seconds - realistic timeout for dead air during Gemini turn
