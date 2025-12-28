@@ -274,6 +274,9 @@ class VoiceActivityDetector:
                         self._h = outs[1]
                         self._c = outs[2]
                     
+                    # Phase 2: Store for external access
+                    self._last_prob = float(prob)
+                    
                 except Exception as e:
                     cur_time = time.time()
                     if cur_time - self.last_error_time > 5.0:
@@ -330,3 +333,24 @@ class VoiceActivityDetector:
                         result_state = VADState.END
         
         return result_state
+    
+    # Phase 2: Helper methods for epoch cancellation
+    def get_current_probability(self) -> float:
+        """Returns the last Silero probability (0.0-1.0)."""
+        return getattr(self, '_last_prob', 0.0)
+    
+    def get_speech_duration_ms(self) -> int:
+        """Returns duration of current speech segment in milliseconds."""
+        return self.consecutive_speech_frames * self.frame_ms
+    
+    def is_hard_interrupt(self, threshold_ms: int = 900, confidence: float = 0.7) -> bool:
+        """
+        Detects if current speech is a 'hard interrupt' based on:
+        - Duration >= threshold_ms
+        - Probability >= confidence
+        
+        Returns True only if BOTH conditions are met.
+        """
+        duration = self.get_speech_duration_ms()
+        prob = self.get_current_probability()
+        return duration >= threshold_ms and prob >= confidence

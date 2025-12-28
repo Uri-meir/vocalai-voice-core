@@ -26,6 +26,7 @@ async def media_stream(websocket: WebSocket):
     # queues for bridging
     mic_queue = asyncio.Queue()     # Twilio -> Gemini
     speaker_queue = asyncio.Queue() # Gemini -> Twilio
+    termination_queue = asyncio.Queue()  # Gemini -> media_stream (for call termination)
     
     stream_sid = None
     sender_task = None
@@ -41,6 +42,16 @@ async def media_stream(websocket: WebSocket):
     # State Machine
     state = "LISTENING"
     last_tts_send_ts = 0
+    
+    # Noise floor tracking (shared with RMS burst detection)
+    noise_floor_rms = None  # Adaptive noise floor for RMS-based voice detection
+    
+    # Confirmed speech burst detector (prevents false resets from noise)
+    speech_accum_ms = 0.0
+    last_frame_ts = None
+    rms_voice_mode = False  # Hysteresis latch
+    last_burst_log_time = 0.0  # For throttled logging
+    last_burst_reset_time = 0.0  # Cooldown to prevent spam resets
     
     # Helper for fire-and-forget clear messages
     async def safe_send_clear():
@@ -62,6 +73,14 @@ async def media_stream(websocket: WebSocket):
     try:
         # Inbound Loop (Twilio -> Gemini)
         while True:
+            # Check for termination signal (non-blocking)
+            try:
+                termination_reason = termination_queue.get_nowait()
+                logger.error(f"🛑 TERMINATION SIGNAL RECEIVED: {termination_reason}")
+                break  # Exit main loop to trigger cleanup
+            except asyncio.QueueEmpty:
+                pass  # No termination signal, continue normally
+            
             message = await websocket.receive_text()
             data = json.loads(message)
             event = data.get("event")
@@ -195,7 +214,8 @@ async def media_stream(websocket: WebSocket):
                     input_queue=mic_queue, 
                     output_queue=speaker_queue,
                     tool_registry=tool_registry,
-                    tool_context=tool_context
+                    tool_context=tool_context,
+                    termination_queue=termination_queue
                 )
 
                 # Resolve Voice Name
@@ -242,31 +262,88 @@ async def media_stream(websocket: WebSocket):
                                 })
                                 last_tts_send_ts = time.time() * 1000
                                 
+                                # Update client's playout tracking for watchdog
+                                if client:
+                                    now = time.monotonic()
+                                    
+                                    # Calculate audio duration: μ-law, 8kHz, 1 byte per sample
+                                    duration_s = len(resampled) / 8000.0
+                                    
+                                    # Extend playout window (handles bursty delivery)
+                                    client.playout_until = max(client.playout_until, now) + duration_s + 0.2
+                                    
+                                    # Mark that Gemini has spoken
+                                    if not client.gemini_has_spoken_this_turn:
+                                        logger.info(f"🎯 Gemini has spoken this turn (first audio, duration={duration_s:.2f}s)")
+                                    client.gemini_has_spoken_this_turn = True
+                                    
+                                    logger.debug(
+                                        f"🔊 Audio sent: {len(resampled)} bytes, "
+                                        f"duration={duration_s:.2f}s, playout_until={client.playout_until - now:.2f}s from now"
+                                    )
+                                
                     except Exception as e:
                         logger.error(f"❌ Error sending to Twilio: {e}", exc_info=True)
                         raise
                 
                 sender_task = asyncio.create_task(send_audio_to_twilio())
                 sender_task.set_name("Twilio_Sender_Task")
+                
+                # Per-call state for turn mechanism
+                user_spoke_this_turn = False
 
             elif event == "media":
                 payload = data.get("media", {}).get("payload")
                 if payload:
                     pcm_8k = mulaw_to_pcm(base64.b64decode(payload))
                     
-                    # Barge-In Processing
-                    if barge_in_enabled and vad_wrapper.enabled:
+                    # === 1. Calculate RMS Energy ===
+                    import audioop
+                    rms = audioop.rms(pcm_8k, 2)  # 2 bytes per sample (int16)
+                    
+                    # Frame timing for burst accumulation
+                    now = time.monotonic()
+                    if last_frame_ts is None:
+                        dt_ms = 20.0  # Twilio frame is typically 20ms
+                    else:
+                        dt_ms = max(0.0, (now - last_frame_ts) * 1000.0)
+                    last_frame_ts = now
+                    
+                    # === 2. VAD Processing ===
+                    if vad_wrapper.enabled:
                         try:
-                            # Echo Guard
+                            # Echo guard check
                             now_ms = time.time() * 1000
                             is_in_echo_guard = False
                             if state == "SPEAKING" and (now_ms - last_tts_send_ts < echo_guard_ms):
                                 is_in_echo_guard = True
                             
-                            # VAD Processing
                             vad_state = vad_wrapper.process_chunk(pcm_8k, is_echo_guard_active=is_in_echo_guard)
                             
+                            # VAD START: User started speaking (HIGH CONFIDENCE)
                             if vad_state == VADState.START:
+                                logger.info("🎤 VAD START - user speaking (HIGH CONFIDENCE - immediate silence reset)")
+                                user_spoke_this_turn = True
+                                
+                                # Immediate reset - VAD is high confidence
+                                if client:
+                                    client.mark_user_activity()
+                                    client.on_user_resumed_speaking(reason="vad_start")
+                                
+                                # Reset RMS burst accumulator
+                                speech_accum_ms = 0.0
+                                rms_voice_mode = False
+                            
+                            # VAD END: User stopped speaking
+                            elif vad_state == VADState.END:
+                                logger.info("🎤 VAD END - user finished")
+                                # NOTE: Do NOT transition to PENDING anymore
+                                # Just let silence accumulate naturally
+                                if user_spoke_this_turn:
+                                    user_spoke_this_turn = False
+                            
+                            # Barge-in handling (existing behavior)
+                            if barge_in_enabled and vad_state == VADState.START:
                                 logger.info("🛑 Barge-In Triggered")
                                 state = "INTERRUPTING"
                                 
@@ -283,11 +360,99 @@ async def media_stream(websocket: WebSocket):
                                     asyncio.create_task(client.interrupt())
                                 else:
                                     asyncio.create_task(client.send_text(" "))
-                                    
+                                
                         except Exception as e:
-                             logger.error(f"VAD Error: {e}", exc_info=True)
+                            logger.error(f"VAD Error: {e}", exc_info=True)
                     
-                    # Forward audio to Gemini
+                    # === 3. RMS Confirmed Speech Burst Detection ===
+                    # Load config
+                    from src.gemini.client import TurnState
+                    SNR_HIGH = config.get("turn.user_silence_snr_high", 1.35)
+                    SNR_LOW = config.get("turn.user_silence_snr_low", 1.15)
+                    MIN_RMS = config.get("turn.rms_absolute_minimum", 200)
+                    BOOTSTRAP_MULT = config.get("turn.rms_bootstrap_multiplier", 1.3)
+                    CONFIRM_MS = config.get("turn.user_silence_confirm_ms", 140)
+                    DECAY_HALFLIFE_MS = config.get("turn.user_silence_decay_halflife_ms", 200)
+                    MAX_ACCUM_MS = 400.0
+                    
+                    # Gate out bot playback/echo
+                    bot_speaking = (client is not None) and (now < client.playout_until)
+                    
+                    if bot_speaking:
+                        # While bot speaking, don't treat RMS as user speech
+                        speech_accum_ms = 0.0
+                        rms_voice_mode = False
+                    else:
+                        # Check if this frame looks like voice
+                        if noise_floor_rms is None:
+                            # IMPROVEMENT 1: Bootstrap noise floor when uninitialized
+                            # Instead of disabling RMS detection entirely, initialize conservatively
+                            noise_floor_rms = rms  # Quick bootstrap (will refine over time)
+                            # Use conservative absolute threshold until floor stabilizes
+                            voice_candidate = (rms > MIN_RMS * BOOTSTRAP_MULT)
+                            logger.debug(f"🔧 Noise floor bootstrapped: {noise_floor_rms:.0f}")
+                        else:
+                            # Hysteresis: choose threshold based on current mode
+                            snr_thr = SNR_LOW if rms_voice_mode else SNR_HIGH
+                            voice_candidate = (rms > MIN_RMS) and (rms > noise_floor_rms * snr_thr)
+                        
+                        if voice_candidate:
+                            rms_voice_mode = True
+                            speech_accum_ms = min(MAX_ACCUM_MS, speech_accum_ms + dt_ms)
+                            
+                            # Log burst accumulation progress (throttled to every 0.5s)
+                            if now - last_burst_log_time >= 0.5 and speech_accum_ms > 50:
+                                snr = rms / noise_floor_rms if noise_floor_rms and noise_floor_rms > 0 else 0
+                                logger.debug(
+                                    f"🔊 RMS burst accumulating: {speech_accum_ms:.0f}ms / {CONFIRM_MS}ms "
+                                    f"(RMS: {rms:.0f}, SNR: {snr:.2f}x)"
+                                )
+                                last_burst_log_time = now
+                        else:
+                            # IMPROVEMENT 3: Time-aware exponential decay (stable across packet jitter)
+                            # Instead of fixed 0.65 multiplier per frame
+                            decay_factor = 0.5 ** (dt_ms / DECAY_HALFLIFE_MS)
+                            speech_accum_ms *= decay_factor
+                            if speech_accum_ms < 20.0:
+                                rms_voice_mode = False
+                        
+                        # Confirmed burst: only now reset silence timer
+                        confirmed_speech_burst = (speech_accum_ms >= CONFIRM_MS)
+                        # Add cooldown: don't reset more than once per 0.5s during continuous speech
+                        cooldown_period = 0.5
+                        cooldown_expired = (now - last_burst_reset_time) >= cooldown_period
+                        
+                        if confirmed_speech_burst and cooldown_expired and client and client.turn_state == TurnState.USER:
+                            client.mark_user_activity()
+                            last_burst_reset_time = now
+                            snr = rms / noise_floor_rms if noise_floor_rms and noise_floor_rms > 0 else 0
+                            logger.info(
+                                f"🔊 RMS: Confirmed speech burst detected (MEDIUM CONFIDENCE - silence reset) | "
+                                f"Burst: {speech_accum_ms:.0f}ms | RMS: {rms:.0f} | "
+                                f"Floor: {noise_floor_rms:.0f} | SNR: {snr:.2f}x"
+                            )
+                            # Reset accumulator to prevent spam resets
+                            speech_accum_ms = 0.0
+                            
+                            # FUTURE ENHANCEMENT: Add 2-out-of-3 check for ultra-robustness
+                            # Require burst AND (recent_vad_start OR speech_like_crest_factor)
+                            # This would further reduce false positives in extreme noise
+                    
+                    # === 4. Update Noise Floor ===
+                    # Update noise floor only during confirmed silence
+                    should_update_noise_floor = (
+                        not bot_speaking
+                        and not rms_voice_mode
+                        and speech_accum_ms < 20.0
+                    )
+                    
+                    if should_update_noise_floor:
+                        if noise_floor_rms is None:
+                            noise_floor_rms = rms
+                        else:
+                            noise_floor_rms = 0.98 * noise_floor_rms + 0.02 * rms
+                    
+                    # === 5. Forward Audio to Gemini (Existing) ===
                     out_rate = 16000
                     pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
                     await mic_queue.put(pcm_16k)
