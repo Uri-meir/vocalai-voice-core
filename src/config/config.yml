@@ -42,7 +42,7 @@ vad:
 # Turn-based state management
 turn:
   # User silence detection (dual-gate: VAD + RMS) - 2 level escalation
-  user_silence_warning_interval_s: 8  # Time between each warning (8s, 16s)
+  user_silence_warning_interval_s: 6  # Time between each warning (8s, 16s)
   
   # Escalation messages
   silence_message_1: "סליחה לא שמעתי מה אמרתה"
