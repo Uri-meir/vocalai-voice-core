@@ -85,15 +85,28 @@ async def recording_callback(request: Request):
         
         # Get signature from headers
         signature = request.headers.get("X-Twilio-Signature", "")
+        
+        # Construct the correct URL for signature validation
+        # In production with reverse proxy (Fly.io), need to check X-Forwarded-Proto
         url = str(request.url)
+        
+        # Fix: If behind reverse proxy, replace http:// with https://
+        if request.headers.get("X-Forwarded-Proto") == "https" and url.startswith("http://"):
+            url = url.replace("http://", "https://", 1)
+            logger.debug(f"🔐 Adjusted URL for reverse proxy: {url}")
         
         # Get form data for validation
         form_data = await request.form()
         params = dict(form_data)
         
+        # Debug logging for signature validation issues
+        logger.info(f"🔐 Signature validation - URL: {url}")
+        logger.debug(f"🔐 Signature: {signature[:20]}... | Params keys: {list(params.keys())}")
+        
         # Verify signature
         if not validator.validate(url, params, signature):
-            logger.error("❌ Invalid Twilio signature - possible unauthorized request")
+            logger.error(f"❌ Invalid Twilio signature - URL: {url}")
+            logger.error(f"❌ Check: 1) Correct auth_token 2) URL matches exactly (https/query params) 3) No proxy issues")
             return {"status": "error", "message": "Invalid signature"}, 403
         
         # 2. Extract Twilio params
