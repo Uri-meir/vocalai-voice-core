@@ -1,4 +1,5 @@
 import logging
+import os
 import uvicorn
 from fastapi import FastAPI
 from src.config.environment import config

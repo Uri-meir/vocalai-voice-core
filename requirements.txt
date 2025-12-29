@@ -6,6 +6,7 @@ onnxruntime
 PyYAML
 fastapi
 uvicorn[standard]
+httpx>=0.24.0
 twilio
 python-multipart
 supabase

@@ -108,6 +108,7 @@ async def media_stream(websocket: WebSocket):
                 customer_number = custom_params.get("customer_number", "unknown") 
 
                 logger.info(f"🏁 Stream Started: {stream_sid}, Assistant: {internal_assistant_id}")
+                logger.info(f"📼 Recording enabled via TwiML <Start><Recording>")
                 
                 call_start_time = datetime.now(timezone.utc)
 

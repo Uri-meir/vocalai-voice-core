@@ -14,13 +14,20 @@ class TwilioClientWrapper:
         """Initiates an outbound call to the specified number."""
         # We pass customer_number in query to forward to media stream for logging
         url = f"{self.public_url}/twilio/voice-hook?assistant_id={assistant_id}&customer_number={customer_number or to}"
+        
+        # Callback URL for when recording is ready - include assistant_id for storage path
+        recording_callback_url = f"{self.public_url}/twilio/recording-callback?assistant_id={assistant_id}"
+        
         try:
             call = self.client.calls.create(
                 to=to,
                 from_=from_number or self.phone_number,
-                url=url
+                url=url,
+                record=True,  # Enable recording at CALL LEVEL (not TwiML)
+                recording_status_callback=recording_callback_url,
+                recording_status_callback_event=['completed']
             )
-            logger.info(f"📞 Call initiated: {call.sid}")
+            logger.info(f"📞 Call initiated with recording: {call.sid} (assistant: {assistant_id})")
             return call.sid
         except Exception as e:
             logger.error(f"❌ Failed to make call: {e}")

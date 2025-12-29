@@ -1,6 +1,6 @@
 import logging
 from fastapi import APIRouter, Form, Response
-from twilio.twiml.voice_response import VoiceResponse, Connect
+from twilio.twiml.voice_response import VoiceResponse, Connect, Start
 from src.config.environment import config
 from src.config.supabase_client import get_supabase_client
 
@@ -56,17 +56,27 @@ async def twilio_inbound(
              resp.say("Sorry, technical configuration error.", language="en-US")
              return Response(content=str(resp), media_type="text/xml")
 
-        # 3. Build TwiML with Media Stream
-        resp = VoiceResponse()
-        connect = Connect()
-        
+        # 3. Build TwiML with Media Stream and Recording
         public_url = config.get("twilio.public_url").strip() if config.get("twilio.public_url") else ""
         if not public_url:
-             logger.error("❌ PUBLIC_URL not set in config")
-             resp = VoiceResponse()
-             resp.say("System configuration error.")
-             return Response(content=str(resp), media_type="text/xml")
-             
+            logger.error("❌ PUBLIC_URL not set in config")
+            resp = VoiceResponse()
+            resp.say("System configuration error.")
+            return Response(content=str(resp), media_type="text/xml")
+        
+        resp = VoiceResponse()
+        
+        # Start recording using <Start><Recording> TwiML (works with Media Streams)
+        # Pass assistant_id in callback URL so we can construct storage path later
+        recording_callback_url = f"{public_url}/twilio/recording-callback?assistant_id={internal_assistant_id}"
+        start = Start()
+        start.recording(recording_status_callback=recording_callback_url,
+                       recording_status_callback_event='completed')
+        resp.append(start)
+        logger.info(f"📼 Recording enabled via <Start><Recording> TwiML (assistant: {internal_assistant_id})")
+        
+        connect = Connect()
+        
         # Construct WSS URL
         # We need to construct the stream URL manually to include query params for the websocket connection
         # Expected WS Path: /twilio/media-stream
