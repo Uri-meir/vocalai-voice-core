@@ -45,6 +45,7 @@ class ConfigManager:
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
     GEMINI_VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Puck")
     N8N_WEBHOOK_URL_DTC = os.getenv("N8N_WEBHOOK_URL_DTC")
+    WHATSAPP_WEBHOOK_URL = os.getenv("WHATSAPP_WEBHOOK_URL")
 
     @property
     def GEMINI_MODEL_ID(self):

@@ -19,7 +19,11 @@ from datetime import datetime, timezone
 @router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
     """Handle Twilio Media Stream WebSocket and Bridge to Gemini."""
-    logger.info(f"🔌 WS CONNECT /twilio/media-stream headers={dict(websocket.headers)}")
+    # Track active connections
+    import src.main as main_module
+    main_module.active_connections += 1
+    
+    logger.info(f"🔌 WS CONNECT /twilio/media-stream headers={dict(websocket.headers)} | Active calls: {main_module.active_connections}")
     await websocket.accept()
     logger.info("✅ WS ACCEPTED")
     
@@ -152,49 +156,108 @@ async def media_stream(websocket: WebSocket):
                 from src.tools.registry import ToolRegistry, ToolContext
                 from src.tools.scheduling import get_open_slots_tool, book_appointment_tool
                 from src.tools.telephony import transfer_call_tool
-                from src.tools.schemas import GetOpenSlotsArgs, BookAppointmentArgs, TransferCallArgs
+                from src.tools.whatsapp import send_whatsapp_tool
+                from src.tools.schemas import GetOpenSlotsArgs, BookAppointmentArgs, TransferCallArgs, SendWhatsAppArgs
+
+
+
 
                 tool_registry = ToolRegistry()
                 
+                # Initialize cal_config and services BEFORE tool loop (needed for ToolContext later)
                 cal_config = assistant_config.calendar_config if assistant_config else None
                 services = cal_config.services if cal_config and cal_config.services else []
-
-                # Dynamic Tool Description
-                get_slots_desc = "Checks calendar availability."
-                book_appt_desc = "Books an appointment."
-
-                if services:
-                    service_lines = [f"- {s.name} ({s.duration} mins)" for s in services]
-                    service_info = "\nAvailable Services:\n" + "\n".join(service_lines) + "\nPlease providing 'duration_minutes' or 'service_name' to select the correct service."
-                    
-                    get_slots_desc += service_info
-                    book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result). " + service_info
+                
+                # Get enabled tools from assistant metadata (with safe fallback)
+                enabled_tools = assistant_config.metadata.get("enabled_tools") if assistant_config and assistant_config.metadata else None
+                
+                # Ensure enabled_tools is a list (handle string format from database)
+                if enabled_tools is None:
+                    enabled_tools = ["standard"]
+                    logger.info(f"🔧 No enabled_tools metadata - defaulting to standard tools for assistant {internal_assistant_id}")
+                elif isinstance(enabled_tools, str):
+                    # Handle case where it's stored as string instead of JSON array
+                    logger.warning(f"⚠️ enabled_tools is a string, not a list. Attempting to parse: {enabled_tools}")
+                    try:
+                        import ast
+                        enabled_tools = ast.literal_eval(enabled_tools)
+                        logger.info(f"🔧 Parsed enabled_tools: {enabled_tools}")
+                    except:
+                        logger.error(f"❌ Failed to parse enabled_tools string. Defaulting to ['standard']")
+                        enabled_tools = ["standard"]
                 else:
-                    get_slots_desc += " Arguments: 'requestedAppointment' (ISO string). Returns list of slots."
-                    book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result)."
+                    logger.info(f"🔧 Registering tools {enabled_tools} for assistant {internal_assistant_id}")
+                
+                # Register each enabled tool
+                for tool_name in enabled_tools:
+                    if tool_name == "whatsapp":
+                        # Register WhatsApp tool
+                        tool_registry.register(
+                            name="sendWhatsApp",
+                            description=(
+                                "Use this tool to send a whatsapp message to the customer"
+                                "Use this tool when the customer wants to use the cleaning service"
+                                "You MUST ask for the customer's name before calling this tool"
+                            ),
+                            args_model=SendWhatsAppArgs,
+                            side_effect=True,
+                            timeout=10.0
+                        )(send_whatsapp_tool)
+                        logger.info(f"  ✅ Registered: sendWhatsApp")
+                    
+                    elif tool_name == "standard":
+                        # Register standard tools (scheduling + transfer)
+                        # Dynamic Tool Description
+                        get_slots_desc = "Checks calendar availability."
+                        book_appt_desc = "Books an appointment."
 
-                # Register Scheduling Tools
-                tool_registry.register(
-                    name="getOpenSlots",
-                    description=get_slots_desc,
-                    args_model=GetOpenSlotsArgs,
-                    side_effect=False
-                )(get_open_slots_tool)
+                        if services:
+                            service_lines = [f"- {s.name} ({s.duration} mins)" for s in services]
+                            service_info = "\nAvailable Services:\n" + "\n".join(service_lines) + "\nPlease providing 'duration_minutes' or 'service_name' to select the correct service."
+                            
+                            get_slots_desc += service_info
+                            book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result). " + service_info
+                        else:
+                            get_slots_desc += " Arguments: 'requestedAppointment' (ISO string). Returns list of slots."
+                            book_appt_desc += " REQUIRED: 'name', 'requestedAppointment' (exact ISO string from getOpenSlots result)."
 
-                tool_registry.register(
-                    name="bookAppointment",
-                    description=book_appt_desc,
-                    args_model=BookAppointmentArgs,
-                    side_effect=True
-                )(book_appointment_tool)
+                        # Register Scheduling Tools
+                        tool_registry.register(
+                            name="getOpenSlots",
+                            description=get_slots_desc,
+                            args_model=GetOpenSlotsArgs,
+                            side_effect=False
+                        )(get_open_slots_tool)
 
-                # Register Telephony Tools
-                tool_registry.register(
-                    name="transfer_call_tool",
-                    description="Use this tool to transfer the caller to a real person when requested or when escalation is needed.",
-                    args_model=TransferCallArgs,
-                    side_effect=True
-                )(transfer_call_tool)
+                        tool_registry.register(
+                            name="bookAppointment",
+                            description=book_appt_desc,
+                            args_model=BookAppointmentArgs,
+                            side_effect=True
+                        )(book_appointment_tool)
+
+                        # Register Transfer Tool
+                        tool_registry.register(
+                            name="transfer_call_tool",
+                            description="Use this tool to transfer the caller to a real person when requested or when escalation is needed.",
+                            args_model=TransferCallArgs,
+                            side_effect=True
+                        )(transfer_call_tool)
+                        
+                        logger.info(f"  ✅ Registered: getOpenSlots, bookAppointment, transfer_call_tool")
+                    
+                    elif tool_name == "transfer":
+                        # Register transfer tool only
+                        tool_registry.register(
+                            name="transfer_call_tool",
+                            description="Use this tool to transfer the caller to a real person when requested or when escalation is needed.",
+                            args_model=TransferCallArgs,
+                            side_effect=True
+                        )(transfer_call_tool)
+                        logger.info(f"  ✅ Registered: transfer_call_tool")
+                    
+                    else:
+                        logger.warning(f"  ⚠️ Unknown tool name: {tool_name}")
                 
                 # Create Tool Context
                 tool_context = ToolContext(
@@ -635,6 +698,8 @@ async def media_stream(websocket: WebSocket):
                     transcript=transcript_str,
                     ended_reason="completed"
                 )
-             )
-        
-        logger.info("👋 Media Stream Cleanup Complete")
+              )
+         
+        # Decrement active connections
+        main_module.active_connections -= 1
+        logger.info(f"👋 Media Stream Cleanup Complete | Active calls: {main_module.active_connections}")

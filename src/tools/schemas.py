@@ -73,5 +73,12 @@ class BookAppointmentArgs(BaseModel):
     duration_minutes: Optional[int] = Field(None, description="Duration in minutes to book.")
     service_name: Optional[str] = Field(None, description="Fuzzy match for the service name.")
 
+
 class TransferCallArgs(BaseModel):
     pass
+
+class SendWhatsAppArgs(BaseModel):
+    name: str = Field(
+        ..., 
+        description="Customer's full name as provided during the conversation."
+    )

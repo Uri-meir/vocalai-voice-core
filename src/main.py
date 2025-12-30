@@ -47,6 +47,33 @@ from fastapi import HTTPException
 from src.api.models import StartCallRequest
 from src.core.assistants_repository_factory import get_assistant_repository
 
+# Global counter for active WebSocket connections
+active_connections = 0
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Fly.io monitoring."""
+    return {
+        "status": "healthy",
+        "active_calls": active_connections,
+        "service": "vocalai-voice-engine"
+    }
+
+@app.get("/stats")
+async def stats():
+    """Monitor concurrent call load."""
+    import psutil
+    import os
+    process = psutil.Process(os.getpid())
+    memory_mb = process.memory_info().rss / 1024 / 1024
+    
+    return {
+        "active_calls": active_connections,
+        "memory_mb": round(memory_mb, 2),
+        "cpu_percent": process.cpu_percent(interval=0.1),
+        "status": "ok" if active_connections < 5 else "high_load"
+    }
+
 @app.get("/debug-logs")
 async def debug_logs():
     """Endpoint to verify deployment and test logging."""

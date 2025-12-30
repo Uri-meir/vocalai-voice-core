@@ -15,9 +15,9 @@ vad:
   silero_sample_rate: 8000
   silero_frame_ms: 32
   # Silero VAD Thresholds (Lower = more sensitive)
-  silero_threshold: 0.3  # Lowered from 0.5 to catch short words like "כן"
+  silero_threshold: 0.25  # Further lowered to catch short words like "yes", "no", "okay"
   silero_echo_threshold: 0.3  # Lowered from 0.75 for better detection during echo guard
-  silero_min_speech_ms: 160  # Lowered from 64ms to catch very short utterances
+  silero_min_speech_ms: 100  # Reduced from 160ms - short answers can be 200-300ms total
 
   # ONNX Performance
   onnx_intra_op_threads: 1
@@ -36,7 +36,7 @@ vad:
   
   # Barge-in (turn-aware interruption)
   barge_in_vad_only: false  # false = use dual-gate (VAD + RMS), true = VAD only
-  barge_in_rms_burst_ms: 140  # Require 100ms burst (less than 160ms silence reset)
+  barge_in_rms_burst_ms: 100  # Reduced from 140ms - allow shorter interruptions
   barge_in_cooldown_ms: 600  # Global cooldown - prevent multiple interrupts (VAD + RMS)
   barge_in_respect_echo_guard: true  # Disable during echo guard window
   barge_in_grace_period_ms: 250  # Don't allow interrupting first 200ms of playout
@@ -56,11 +56,11 @@ turn:
   silence_message_final: "עדיין אין מענה, אסיים את השיחה כעת"
   
   # RMS-based voice detection with burst accumulation (prevents false triggers)
-  user_silence_snr_high: 1.5      # SNR to enter voice mode (harder threshold)
-  user_silence_snr_low: 1.25        # SNR to stay in voice mode (easier, hysteresis)
-  rms_absolute_minimum: 250        # Minimum RMS to consider as voice
-  rms_bootstrap_multiplier: 1.3      # Conservative multiplier when noise floor uninitialized
-  user_silence_confirm_ms: 160       # ms of voice activity needed to reset timer
+  user_silence_snr_high: 1.35     # Lowered from 1.5 - more sensitive to soft-spoken short answers
+  user_silence_snr_low: 1.15      # Lowered from 1.25 - easier to maintain voice mode
+  rms_absolute_minimum: 200       # Lowered from 250 - catch quieter responses
+  rms_bootstrap_multiplier: 1.3   # Conservative multiplier when noise floor uninitialized
+  user_silence_confirm_ms: 100    # Reduced from 160ms - short "yes"/"no" are ~200-300ms
   user_silence_decay_halflife_ms: 200  # Half-life for time-aware exponential decay
   
   # Safety mechanisms

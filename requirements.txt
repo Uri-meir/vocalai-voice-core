@@ -12,3 +12,4 @@ python-multipart
 supabase
 soxr
 numpy
+psutil

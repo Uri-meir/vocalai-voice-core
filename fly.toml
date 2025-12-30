@@ -9,6 +9,15 @@ primary_region = "iad"
   auto_stop_machines = "off"   # CRITICAL: Keeps it always on
   min_machines_running = 1
   processes = ["app"]
+  
+  # Health Check (prevents Fly.io from killing healthy instances)
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+  
   # Concurrency Limits (Prevents Voice Jitter)
   [http_service.concurrency]
     type = "connections"
