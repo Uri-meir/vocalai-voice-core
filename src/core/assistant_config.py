@@ -1,6 +1,8 @@
 from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 
+ALLOWED_VOICES = ["Zephyr", "Achernar", "Aoede", "Kore", "Puck", "Charon", "Fenrir"]
+
 class ServiceConfig(BaseModel):
     name: str
     duration: int

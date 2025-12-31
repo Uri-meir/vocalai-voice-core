@@ -290,7 +290,7 @@ async def media_stream(websocket: WebSocket):
                 )
 
                 # Resolve Voice Name
-                ALLOWED_VOICES = ["Puck", "Charon", "Aoede", "Fenrir", "Kore"]
+                from src.core.assistant_config import ALLOWED_VOICES
                 desired_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else None
                 
                 # Validation: Fallback to None (Default) if invalid
