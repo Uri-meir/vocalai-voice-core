@@ -5,6 +5,7 @@ import base64
 import asyncio
 from src.telephony.audio_utils import mulaw_to_pcm, pcm_to_mulaw, resample_audio
 from src.gemini.client import GeminiLiveClient
+from src.stt.soniox_client import SonioxClient
 from src.config.environment import config
 import time
 
@@ -85,6 +86,12 @@ async def media_stream(websocket: WebSocket):
     call_id = None
     assistant_id_webhook = None
     customer_number = None
+    
+    # Soniox STT (Dual Channel)
+    soniox_client = None
+    last_soniox_text = None
+    last_soniox_time = None
+    fallback_timer_task = None
 
     try:
         # Inbound Loop (Twilio -> Gemini)
@@ -355,6 +362,72 @@ async def media_stream(websocket: WebSocket):
                             )
                         )
                         client_task.set_name("Gemini_Client_Task")
+                        
+                        # === Initialize Soniox STT (Dual Channel) ===
+                        soniox_enabled = config.get("soniox.enabled", False)
+                        if soniox_enabled and config.SONIOX_API_KEY:
+                            try:
+                                # Define hybrid fallback callback
+                                async def on_soniox_transcript(text: str, timestamp_ms: float):
+                                    """
+                                    Hybrid Gating Logic:
+                                    When Soniox detects a final transcript, start a fallback timer.
+                                    If Gemini doesn't respond within timeout, inject the text.
+                                    """
+                                    nonlocal last_soniox_text, last_soniox_time, fallback_timer_task
+                                    
+                                    last_soniox_text = text
+                                    last_soniox_time = time.time()
+                                    
+                                    # Cancel previous timer if exists
+                                    if fallback_timer_task and not fallback_timer_task.done():
+                                        fallback_timer_task.cancel()
+                                    
+                                    # Start fallback timer
+                                    async def fallback_check():
+                                        fallback_timeout_ms = config.get("soniox.fallback_timeout_ms", 600)
+                                        max_length = config.get("soniox.max_utterance_length", 50)
+                                        
+                                        await asyncio.sleep(fallback_timeout_ms / 1000.0)
+                                        
+                                        # Check if fallback is needed
+                                        from src.gemini.client import TurnState
+                                        should_fallback = (
+                                            client.turn_state == TurnState.USER  # Still waiting for user
+                                            and not client.model_has_spoken_this_turn  # Gemini hasn't responded
+                                            and len(text) <= max_length  # Short utterance
+                                        )
+                                        
+                                        if should_fallback:
+                                            logger.warning(
+                                                f"🔄 Hybrid Fallback: Gemini missed short utterance. "
+                                                f"Injecting Soniox text: '{text}'"
+                                            )
+                                            await client.send_text(text)
+                                        else:
+                                            logger.debug(f"✅ Gemini responded to '{text}', fallback aborted")
+                                    
+                                    fallback_timer_task = asyncio.create_task(fallback_check())
+                                    fallback_timer_task.set_name("Soniox_Fallback_Timer")
+                                
+                                # Initialize Soniox client
+                                soniox_client = SonioxClient(
+                                    api_key=config.SONIOX_API_KEY,
+                                    on_final_transcript=on_soniox_transcript,
+                                    model=config.get("soniox.model", "stt-rt-preview"),
+                                    language_hints=config.get("soniox.language_hints", ["he", "en"]),
+                                    enable_endpoint_detection=config.get("soniox.enable_endpoint_detection", True)
+                                )
+                                
+                                await soniox_client.connect()
+                                logger.info("✅ Soniox STT initialized (Dual Channel mode)")
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Failed to initialize Soniox: {e}", exc_info=True)
+                                soniox_client = None
+                        else:
+                            logger.info("ℹ️ Soniox STT disabled (check config.soniox.enabled and SONIOX_API_KEY)")
+
                         
                 except Exception as provider_error:
                     # Fallback to Gemini if OpenAI fails
@@ -741,6 +814,10 @@ async def media_stream(websocket: WebSocket):
                     out_rate = 16000
                     pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
                     await mic_queue.put(pcm_16k)
+                    
+                    # Forward to Soniox (Dual Channel)
+                    if soniox_client and soniox_client.is_connected:
+                        await soniox_client.send_audio(pcm_16k)
                     
                     # Track audio flow for observability
                     audio_enqueued_bytes += len(pcm_16k)

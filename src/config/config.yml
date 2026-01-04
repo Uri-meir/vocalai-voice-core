@@ -90,7 +90,7 @@ openai:
   language_instruction: "You MUST respond ONLY in Hebrew. Never switch to English or any other language, regardless of names or context."
 
 watchdog:
-  silence_timeout_ms: 6000  # 6 seconds - realistic timeout for dead air during Gemini turn
+  silence_timeout_ms: 9000  # 6 seconds - realistic timeout for dead air during Gemini turn
   max_nudges_per_turn: 2    # Limit nudges to avoid spam
   silence_nudge_text: "המשיכי לענות עכשיו בקול"  # Continue in voice
 
@@ -100,3 +100,12 @@ twilio:
   phone_number: "${TWILIO_PHONE_NUMBER}"
   public_url: "${PUBLIC_URL}"
 
+
+# Soniox STT (Dual Channel)
+soniox:
+  enabled: true  # Enable parallel STT stream
+  model: "stt-rt-preview"
+  language_hints: ["he", "en"]
+  enable_endpoint_detection: true
+  fallback_timeout_ms: 4000  # Wait 600ms for Gemini before injecting Soniox transcript
+  max_utterance_length: 50  # Only fallback for short utterances (char count)

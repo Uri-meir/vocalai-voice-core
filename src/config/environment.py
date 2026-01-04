@@ -41,7 +41,14 @@ class ConfigManager:
         return value
 
     # --- Secrets (from .env) ---
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    @property
+    def GEMINI_API_KEY(self):
+        return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    
+    @property
+    def SONIOX_API_KEY(self):
+        return os.getenv("SONIOX_API_KEY")
+
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
     GEMINI_VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Puck")
