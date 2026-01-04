@@ -553,11 +553,17 @@ class GeminiLiveClient:
                     
                     # Send final message (agent will handle call termination via tool)
                     await self.send_text(f"Reply exactly this: {message_final}", end_of_turn=True)
-                    logger.error(f"📤 Final warning sent: '{message_final}' - agent will handle hangup via tool")
+                    logger.error(f"📤 Final warning sent: '{message_final}' - Hang up in 5 seconds")
                     
                     # Mark as level 2 to prevent repeated messages
                     self.user_silence_warning_level = 2
                     self.last_user_activity_at = time.monotonic()
+                    
+                    # Signal call termination after final message is sent
+                    if self.termination_queue:
+                        await asyncio.sleep(5.0)  # Wait for Gemini to speak the final message
+                        await self.termination_queue.put("user_silence_timeout")
+                        logger.error("📞 Call termination signal sent (user silence timeout)")
                     continue
             
             except asyncio.CancelledError:
