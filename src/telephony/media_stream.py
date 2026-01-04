@@ -92,6 +92,7 @@ async def media_stream(websocket: WebSocket):
     last_soniox_text = None
     last_soniox_time = None
     fallback_timer_task = None
+    last_fallback_time = None  # For cooldown tracking
 
     try:
         # Inbound Loop (Twilio -> Gemini)
@@ -376,8 +377,13 @@ async def media_stream(websocket: WebSocket):
                                     """
                                     nonlocal last_soniox_text, last_soniox_time, fallback_timer_task
                                     
+                                    logger.info(f"🎯 Soniox callback triggered for: '{text}' (timestamp={timestamp_ms})")
+                                    
+                                    # Forward transcript to Gemini client for user transcript logging
+                                    client.add_user_transcript(text)
+                                    
                                     last_soniox_text = text
-                                    last_soniox_time = time.time()
+                                    last_soniox_time = time.monotonic()  # CRITICAL: Use monotonic to match client.last_model_activity_at
                                     
                                     # Cancel previous timer if exists
                                     if fallback_timer_task and not fallback_timer_task.done():
@@ -385,30 +391,74 @@ async def media_stream(websocket: WebSocket):
                                     
                                     # Start fallback timer
                                     async def fallback_check():
-                                        fallback_timeout_ms = config.get("soniox.fallback_timeout_ms", 600)
-                                        max_length = config.get("soniox.max_utterance_length", 50)
+                                        fallback_timeout_ms = config.get("soniox.fallback_timeout_ms", 4000)
+                                        max_length = config.get("soniox.max_utterance_length", 20)
+                                        max_words = config.get("soniox.max_word_count", 3)
+                                        freshness_window_ms = config.get("soniox.freshness_window_ms", 1200)
+                                        cooldown_ms = config.get("soniox.cooldown_ms", 800)
                                         
                                         await asyncio.sleep(fallback_timeout_ms / 1000.0)
                                         
-                                        # Check if fallback is needed
+                                        logger.info(f"⏰ Fallback timer expired for '{text}', checking conditions...")
+                                        
+                                        # Check if fallback is needed (robust production logic)
                                         from src.gemini.client import TurnState
+                                        now_ms = time.monotonic() * 1000  # Use monotonic to match last_soniox_time and last_model_activity_at
+                                        soniox_time_ms = last_soniox_time * 1000
+                                        
+                                        # Get last model activity timestamp (convert to ms)
+                                        last_model_activity_ms = (
+                                            client.last_model_activity_at * 1000 
+                                            if hasattr(client, 'last_model_activity_at') and client.last_model_activity_at
+                                            else 0
+                                        )
+                                        
+                                        # Word count check
+                                        word_count = len(text.split())
+                                        
+                                        # Freshness check
+                                        age_ms = now_ms - soniox_time_ms
+                                        is_fresh = age_ms <= freshness_window_ms
+                                        
+                                        # Activity check: no model activity after Soniox detected the utterance
+                                        no_model_activity_after = last_model_activity_ms <= soniox_time_ms
+                                        
+                                        # Cooldown check (prevent spam)
+                                        nonlocal last_fallback_time
+                                        time_since_last_fallback = now_ms - (last_fallback_time * 1000 if last_fallback_time else 0)
+                                        cooldown_ok = time_since_last_fallback >= cooldown_ms
+                                        
                                         should_fallback = (
                                             client.turn_state == TurnState.USER  # Still waiting for user
-                                            and not client.model_has_spoken_this_turn  # Gemini hasn't responded
-                                            and len(text) <= max_length  # Short utterance
+                                            and no_model_activity_after  # No model activity after utterance
+                                            and is_fresh  # Not stale
+                                            and len(text) <= max_length  # Short utterance (chars)
+                                            and word_count <= max_words  # Short utterance (words)
+                                            and cooldown_ok  # Not spamming
                                         )
                                         
                                         if should_fallback:
                                             logger.warning(
                                                 f"🔄 Hybrid Fallback: Gemini missed short utterance. "
-                                                f"Injecting Soniox text: '{text}'"
+                                                f"Injecting Soniox text: '{text}' "
+                                                f"(len={len(text)}, words={word_count}, age={age_ms:.0f}ms)"
                                             )
                                             await client.send_text(text)
+                                            last_fallback_time = time.monotonic()  # Use monotonic to match now_ms
                                         else:
-                                            logger.debug(f"✅ Gemini responded to '{text}', fallback aborted")
+                                            logger.info(
+                                                f"✅ Fallback aborted for '{text}': "
+                                                f"turn={client.turn_state.value}, "
+                                                f"model_activity={not no_model_activity_after}, "
+                                                f"fresh={is_fresh}, "
+                                                f"len_ok={len(text) <= max_length}, "
+                                                f"words_ok={word_count <= max_words}, "
+                                                f"cooldown_ok={cooldown_ok}"
+                                            )
                                     
                                     fallback_timer_task = asyncio.create_task(fallback_check())
                                     fallback_timer_task.set_name("Soniox_Fallback_Timer")
+                                    logger.info(f"✅ Fallback timer task created and scheduled for '{text}'")
                                 
                                 # Initialize Soniox client
                                 soniox_client = SonioxClient(

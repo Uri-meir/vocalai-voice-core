@@ -63,6 +63,18 @@ class GeminiLiveClient:
         self.last_model_activity_at = time.monotonic()
         self.silence_accumulator_s = 0.0  # Reset silence on any activity
 
+    def add_user_transcript(self, text: str):
+        """
+        Add user transcript from external source (Soniox STT).
+        Called by media_stream when Soniox returns a final transcript.
+        """
+        if text and text.strip():
+            # Clean up Soniox markers like <end>
+            clean_text = text.replace("<end>", "").strip()
+            if clean_text:
+                self.current_user_transcript.append(clean_text)
+                logger.info(f"📝 Soniox user transcript: {clean_text[:50]}{'...' if len(clean_text) > 50 else ''}")
+
     def mark_user_activity(self):
         """
         Called when ANY voice activity detected (VAD or RMS burst).
@@ -368,12 +380,12 @@ class GeminiLiveClient:
                         if response.tool_call and response.tool_call.function_calls:
                             self.mark_model_activity()
                     
-                    # === Capture Input Transcription (User Speech) ===
-                    if response.server_content and response.server_content.input_transcription:
-                        user_text = response.server_content.input_transcription.text
-                        # Accumulate user transcript chunks (consolidated on turn transition)
-                        self.current_user_transcript.append(user_text)
-                        logger.debug(f"📝 User transcript chunk: {user_text[:50]}...")
+                    # === Input Transcription DISABLED - Using Soniox for accurate Hebrew ===
+                    # Gemini's input_transcription is replaced by Soniox STT (see add_user_transcript method)
+                    # if response.server_content and response.server_content.input_transcription:
+                    #     user_text = response.server_content.input_transcription.text
+                    #     self.current_user_transcript.append(user_text)
+                    #     logger.debug(f"📝 User transcript chunk: {user_text[:50]}...")
                     
                     # === Capture Output Transcription (Bot Speech) ===
                     if response.server_content and response.server_content.output_transcription:
