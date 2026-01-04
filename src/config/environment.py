@@ -42,6 +42,7 @@ class ConfigManager:
 
     # --- Secrets (from .env) ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
     GEMINI_VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Puck")
     N8N_WEBHOOK_URL_DTC = os.getenv("N8N_WEBHOOK_URL_DTC")

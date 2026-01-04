@@ -46,7 +46,7 @@ class GeminiLiveClient:
         # Watchdog state
         self.playout_until = 0.0  # Monotonic timestamp when audio playback should finish
         self.playout_started_at = 0.0  # Monotonic timestamp when FIRST chunk of turn is sent (for barge-in grace period)
-        self.gemini_has_spoken_this_turn = False  # Track if Gemini actually spoke (not just committed)
+        self.model_has_spoken_this_turn = False  # Track if Gemini actually spoke (not just committed)
         self.silence_accumulator_s = 0.0  # Accumulate actual silence (only increments when silent)
         self.nudge_count_this_turn = 0  # Limit nudges per Gemini turn
         self.max_nudges_per_turn = 2  # Max nudges before giving up
@@ -96,7 +96,7 @@ class GeminiLiveClient:
         self.nudge_count_this_turn = 0  # Reset for next turn
         self.silence_accumulator_s = 0.0  # Reset silence
         self.playout_until = 0.0  # Reset playout tracking
-        self.gemini_has_spoken_this_turn = False  # Reset speech flag
+        self.model_has_spoken_this_turn = False  # Reset speech flag
         
         # Log turn change with silence tracking info
         warning_interval = config.get("turn.user_silence_warning_interval_s", 6)
@@ -133,7 +133,7 @@ class GeminiLiveClient:
         self.nudge_count_this_turn = 0  # Reset nudge counter for new turn
         self.silence_accumulator_s = 0.0  # Reset silence
         self.playout_until = 0.0  # Reset playout tracking
-        self.gemini_has_spoken_this_turn = False  # Reset speech flag (will be set when audio arrives)
+        self.model_has_spoken_this_turn = False  # Reset speech flag (will be set when audio arrives)
         logger.info(f"🔄 TURN {old_state} → GEMINI ({reason})")
 
     # DEPRECATED: No longer used with new silence detection system
@@ -329,8 +329,8 @@ class GeminiLiveClient:
                                     await self.output_queue.put(inline.data)
                                     self.mark_model_activity()  # Mark on each audio chunk
                                     # Set flag for watchdog (first audio = Gemini has spoken)
-                                    if not self.gemini_has_spoken_this_turn:
-                                        self.gemini_has_spoken_this_turn = True
+                                    if not self.model_has_spoken_this_turn:
+                                        self.model_has_spoken_this_turn = True
                                         logger.debug("🎯 Gemini has spoken this turn (first audio in receive_loop)")
                                 
                                 # Check for ACTUAL text content
@@ -356,8 +356,8 @@ class GeminiLiveClient:
                                     await self.output_queue.put(inline.data)
                                     self.mark_model_activity()  # Mark on each audio chunk
                                     # Set flag for watchdog
-                                    if not self.gemini_has_spoken_this_turn:
-                                        self.gemini_has_spoken_this_turn = True
+                                    if not self.model_has_spoken_this_turn:
+                                        self.model_has_spoken_this_turn = True
                                         logger.debug("🎯 Gemini has spoken this turn (audio in GEMINI state)")
                                 
                                 # Mark on text too
@@ -575,7 +575,7 @@ class GeminiLiveClient:
                     continue  # Tool executing, silence is expected
                 
                 # 🔑 CRITICAL: Wait until Gemini actually spoke (not just committed)
-                if not self.gemini_has_spoken_this_turn:
+                if not self.model_has_spoken_this_turn:
                     self.silence_accumulator_s = 0.0  # Reset until speech starts
                     continue  # Text arrived but no audio yet
                 
@@ -590,7 +590,7 @@ class GeminiLiveClient:
                 playout_remaining = max(0, self.playout_until - now)
                 logger.info(
                     f"🚨 Watchdog COUNTING: playout finished {-playout_remaining:.2f}s ago, "
-                    f"has_spoken={self.gemini_has_spoken_this_turn}, "
+                    f"has_spoken={self.model_has_spoken_this_turn}, "
                     f"turn={self.turn_state.value}, tools={self.tools_in_flight}"
                 )
                 
@@ -600,7 +600,7 @@ class GeminiLiveClient:
                 logger.info(
                     f"⏱️ Watchdog: silence={self.silence_accumulator_s:.1f}s/{self.silence_timeout_s:.1f}s, "
                     f"playout_until={playout_remaining:.2f}s, "
-                    f"has_spoken={self.gemini_has_spoken_this_turn}, "
+                    f"has_spoken={self.model_has_spoken_this_turn}, "
                     f"tools={self.tools_in_flight}, "
                     f"turn={self.turn_state.value}"
                 )

@@ -64,6 +64,11 @@ async def media_stream(websocket: WebSocket):
     rms_barge_in_accum_ms = 0.0  # Separate accumulator for barge-in (independent from silence RMS)
     last_barge_in_frame_ts = None  # Separate timestamp for barge-in dt calculation
     
+    # Observability: Audio flow tracking
+    audio_enqueued_bytes = 0  # Total bytes put into mic_queue
+    last_audio_log_time = 0.0  # For throttled logging
+    audio_log_interval = 10.0  # Log every 10 seconds
+    
     # Helper for fire-and-forget clear messages
     async def safe_send_clear():
         try:
@@ -280,35 +285,114 @@ async def media_stream(websocket: WebSocket):
                 # Reset VAD State
                 vad_wrapper.reset()
                 
-                # Re-Initialize Client with Tools
-                client = GeminiLiveClient(
-                    input_queue=mic_queue, 
-                    output_queue=speaker_queue,
-                    tool_registry=tool_registry,
-                    tool_context=tool_context,
-                    termination_queue=termination_queue
-                )
-
-                # Resolve Voice Name
-                from src.core.assistant_config import ALLOWED_VOICES
-                desired_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else None
+                # Determine provider based on tts_model
+                tts_model = (assistant_config.tts_model or "").lower() if assistant_config else ""
+                use_openai = (tts_model == "openai")
                 
-                # Validation: Fallback to None (Default) if invalid
-                final_voice = desired_voice if desired_voice in ALLOWED_VOICES else None
-                if desired_voice and final_voice is None:
-                    logger.warning(f"⚠️ Invalid voice_id '{desired_voice}'. Falling back to default.")
-
-                # Start Gemini Session
-                gemini_task = asyncio.create_task(
-                    client.start(
-                        system_instruction=system_instruction,
-                        initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None,
-                        voice_name=final_voice,
-                        temperature=0.4  # Default creativity
-                    )
-                )
+                # Try to initialize the selected provider, fall back to Gemini on failure
+                client = None
+                client_task = None
+                provider_name = "OpenAI" if use_openai else "Gemini"
                 
-                gemini_task.set_name("Gemini_Client_Task")
+                try:
+                    if use_openai:
+                        # Initialize OpenAI client
+                        from src.openai_realtime.client import OpenAILiveClient
+                        
+                        logger.info(f"🤖 Using OpenAI Realtime provider for assistant {internal_assistant_id}")
+                        client = OpenAILiveClient(
+                            input_queue=mic_queue, 
+                            output_queue=speaker_queue,
+                            tool_registry=tool_registry,
+                            tool_context=tool_context,
+                            termination_queue=termination_queue
+                        )
+                        
+                        # Resolve model and voice for OpenAI
+                        openai_model = assistant_config.llm_model if assistant_config and assistant_config.llm_model else config.get("openai.model_id", "gpt-realtime-2025-08-28")
+                        openai_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else config.get("openai.voice_name", "alloy")
+                        
+                        logger.info(f"🎙️ OpenAI config: model={openai_model}, voice={openai_voice}")
+                        
+                        # Start OpenAI Session
+                        client_task = asyncio.create_task(
+                            client.start(
+                                system_instruction=system_instruction,
+                                initial_text=assistant_config.first_message if assistant_config and assistant_config.first_message else None,
+                                voice_name=openai_voice,
+                                model_id=openai_model,
+                                temperature=config.get("openai.temperature", 0.8)
+                            )
+                        )
+                        client_task.set_name("OpenAI_Client_Task")
+                        
+                    else:
+                        # Initialize Gemini client (default)
+                        client = GeminiLiveClient(
+                            input_queue=mic_queue, 
+                            output_queue=speaker_queue,
+                            tool_registry=tool_registry,
+                            tool_context=tool_context,
+                            termination_queue=termination_queue
+                        )
+
+                        # Resolve Voice Name for Gemini
+                        from src.core.assistant_config import ALLOWED_VOICES
+                        desired_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else None
+                        
+                        # Validation: Fallback to None (Default) if invalid
+                        final_voice = desired_voice if desired_voice in ALLOWED_VOICES else None
+                        if desired_voice and final_voice is None:
+                            logger.warning(f"⚠️ Invalid voice_id '{desired_voice}'. Falling back to default.")
+
+                        # Start Gemini Session
+                        client_task = asyncio.create_task(
+                            client.start(
+                                system_instruction=system_instruction,
+                                initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None,
+                                voice_name=final_voice,
+                                temperature=0.4  # Default creativity
+                            )
+                        )
+                        client_task.set_name("Gemini_Client_Task")
+                        
+                except Exception as provider_error:
+                    # Fallback to Gemini if OpenAI fails
+                    if use_openai:
+                        logger.error(f"❌ Failed to initialize OpenAI provider: {provider_error}")
+                        logger.info("🔄 Falling back to Gemini provider")
+                        
+                        client = GeminiLiveClient(
+                            input_queue=mic_queue, 
+                            output_queue=speaker_queue,
+                            tool_registry=tool_registry,
+                            tool_context=tool_context,
+                            termination_queue=termination_queue
+                        )
+
+                        # Resolve Voice Name for Gemini
+                        from src.core.assistant_config import ALLOWED_VOICES
+                        desired_voice = assistant_config.voice_id if assistant_config and assistant_config.voice_id else None
+                        final_voice = desired_voice if desired_voice in ALLOWED_VOICES else None
+                        if desired_voice and final_voice is None:
+                            logger.warning(f"⚠️ Invalid voice_id '{desired_voice}'. Falling back to default.")
+
+                        # Start Gemini Session
+                        client_task = asyncio.create_task(
+                            client.start(
+                                system_instruction=system_instruction,
+                                initial_text=f"Say exactly this: {assistant_config.first_message}" if assistant_config and assistant_config.first_message else None,
+                                voice_name=final_voice,
+                                temperature=0.4
+                            )
+                        )
+                        client_task.set_name("Gemini_Client_Task_Fallback")
+                        provider_name = "Gemini (fallback)"
+                    else:
+                        # Gemini init failed, re-raise
+                        raise
+                
+                gemini_task = client_task  # Keep variable name for compatibility
 
                 # Start Outbound Sender
                 async def send_audio_to_twilio():
@@ -351,12 +435,12 @@ async def media_stream(websocket: WebSocket):
                                     
                                     # Track playout start ONCE per turn (for barge-in grace period)
                                     # CRITICAL: Set only on first chunk, not every chunk!
-                                    if not client.gemini_has_spoken_this_turn:
+                                    if not client.model_has_spoken_this_turn:
                                         client.playout_started_at = now
-                                        logger.info(f"🎯 Gemini has spoken this turn (first audio, duration={duration_s:.2f}s, playout_started_at={now:.2f})")
+                                        logger.info(f"🎯 Model has spoken this turn (first audio, duration={duration_s:.2f}s, playout_started_at={now:.2f})")
                                     
-                                    # Mark that Gemini has spoken
-                                    client.gemini_has_spoken_this_turn = True
+                                    # Mark that model has spoken
+                                    client.model_has_spoken_this_turn = True
                                     
                                     logger.debug(
                                         f"🔊 Audio sent: {len(resampled)} bytes, "
@@ -653,10 +737,20 @@ async def media_stream(websocket: WebSocket):
                         else:
                             noise_floor_rms = 0.98 * noise_floor_rms + 0.02 * rms
                     
-                    # === 5. Forward Audio to Gemini (Existing) ===
+                    # === 5. Forward Audio to Provider ===
                     out_rate = 16000
                     pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
                     await mic_queue.put(pcm_16k)
+                    
+                    # Track audio flow for observability
+                    audio_enqueued_bytes += len(pcm_16k)
+                    now_log = time.time()
+                    if now_log - last_audio_log_time >= audio_log_interval:
+                        logger.info(
+                            f"📊 Audio flow: {audio_enqueued_bytes / 1024:.1f}KB enqueued to mic_queue "
+                            f"({audio_enqueued_bytes / (now_log - (last_audio_log_time or now_log) or 1) / 1024:.1f} KB/s)"
+                        )
+                        last_audio_log_time = now_log
                     
             elif event == "stop":
                 logger.info("🛑 Stream Stopped")

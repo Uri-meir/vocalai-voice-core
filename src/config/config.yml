@@ -6,7 +6,7 @@ audio:
   chunk_size_default: 1024
 # 1-3 when 3 is the most agressive ( sensitive to noise )
 vad:
-  enabled: true
+  enabled: false
   barge_in_enabled: false 
   backend: "silero"
 
@@ -49,7 +49,7 @@ vad:
 # Turn-based state management
 turn:
   # User silence detection (dual-gate: VAD + RMS) - 2 level escalation
-  user_silence_warning_interval_s: 6  # Time between each warning (8s, 16s)
+  user_silence_warning_interval_s: 7  # Time between each warning (8s, 16s)
   
   # Escalation messages
   silence_message_1: "סליחה לא שמעתי מה אמרתה"
@@ -74,6 +74,20 @@ gemini:
   temperature: 0.4
   greeting_text: "שלום שמי שיר, מהמרפאה של אורי מאיר. כיצד אוכל לסייע ?"
   enable_transcription: true  # Enable audio transcription for call logging
+
+openai:
+  # NOTE: Some accounts do NOT have access to the gpt-4o-realtime-preview* models.
+  # This default is chosen because it is widely available; if you have access to a newer model,
+  # override via DB `voice_assistant_configs.llm_model`.
+  model_id: "gpt-realtime-2025-08-28"  # OpenAI Realtime model (default)
+  fallback_model_id: "gpt-realtime-2025-08-28"  # Used if the requested model is not accessible
+  voice_name: "nova"  # OpenAI voice (alloy, echo, shimmer, fable, onyx, nova)
+  temperature: 0.8
+  debug_events: false  # If true, logs all Realtime events (VERY noisy; keep false in prod)
+  input_sample_rate_hz: 16000   # Matches mic_queue PCM format
+  output_sample_rate_hz: 24000  # Matches Twilio sender expectation
+  enable_transcription: true    # Enable audio transcription for call logging
+  language_instruction: "You MUST respond ONLY in Hebrew. Never switch to English or any other language, regardless of names or context."
 
 watchdog:
   silence_timeout_ms: 6000  # 6 seconds - realistic timeout for dead air during Gemini turn

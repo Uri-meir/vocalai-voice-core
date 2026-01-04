@@ -13,3 +13,4 @@ supabase
 soxr
 numpy
 psutil
+websockets>=12.0

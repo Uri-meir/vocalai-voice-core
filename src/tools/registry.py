@@ -159,3 +159,39 @@ class ToolRegistry:
             declarations.append(function_decl)
             
         return declarations
+
+    def get_openai_tools(self) -> List[Dict[str, Any]]:
+        """
+        Convert registered tools to OpenAI Realtime API function tool format.
+        Returns a list of tool definitions compatible with OpenAI's function calling.
+        
+        OpenAI Realtime API format:
+        {
+          "type": "function",
+          "name": "function_name",
+          "description": "description",
+          "parameters": { JSON Schema }
+        }
+        """
+        tools = []
+        for name, spec in self._tools.items():
+            # Generate JSON Schema from Pydantic
+            schema = spec.args_model.model_json_schema()
+            
+            # OpenAI Realtime expects parameters as a JSON Schema object
+            parameters = {
+                "type": "object",
+                "properties": schema.get("properties", {}),
+                "required": schema.get("required", [])
+            }
+            
+            # OpenAI Realtime API expects flat structure (not nested under "function")
+            tool_def = {
+                "type": "function",
+                "name": name,
+                "description": spec.description,
+                "parameters": parameters
+            }
+            tools.append(tool_def)
+            
+        return tools
