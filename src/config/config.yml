@@ -70,13 +70,13 @@ turn:
 gemini:
   model_id: "gemini-2.5-flash-native-audio-preview-12-2025"
   use_defaults: true
-  voice_name: "Aoede"
+  voice_name: "Zephyr"
   temperature: 0.4
   greeting_text: "שלום שמי שיר, מהמרפאה של אורי מאיר. כיצד אוכל לסייע ?"
   enable_transcription: true  # Enable audio transcription for call logging
+  activity_handling: "NO_INTERRUPTION"  # Prevent Gemini from being interrupted mid-sentence
 
 openai:
-  # NOTE: Some accounts do NOT have access to the gpt-4o-realtime-preview* models.
   # This default is chosen because it is widely available; if you have access to a newer model,
   # override via DB `voice_assistant_configs.llm_model`.
   model_id: "gpt-realtime-2025-08-28"  # OpenAI Realtime model (default)

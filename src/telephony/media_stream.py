@@ -4,7 +4,7 @@ import json
 import base64
 import asyncio
 from src.telephony.audio_utils import mulaw_to_pcm, pcm_to_mulaw, resample_audio
-from src.gemini.client import GeminiLiveClient
+from src.gemini.client import GeminiLiveClient, TurnState
 from src.stt.soniox_client import SonioxClient
 from src.config.environment import config
 import time
@@ -116,6 +116,16 @@ async def media_stream(websocket: WebSocket):
                 stream_sid = data.get("start", {}).get("streamSid")
                 call_id = data.get("start", {}).get("callSid")
                 custom_params = data.get("start", {}).get("customParameters", {})
+                
+                # Guard against duplicate start events (can happen on reconnect/edge cases).
+                # IMPORTANT: We still update stream_sid/call_id above so outbound audio uses the latest streamSid,
+                # but we avoid re-initializing the provider client (which would wipe in-memory transcript state).
+                if client is not None:
+                    logger.warning(
+                        f"⚠️ Duplicate Twilio start received; ignoring re-init. "
+                        f"call_id={call_id}, stream_sid={stream_sid}"
+                    )
+                    continue
                 
                 # Internal ID used for config lookup
                 internal_assistant_id = custom_params.get("assistant_id")
@@ -383,7 +393,7 @@ async def media_stream(websocket: WebSocket):
                                     client.add_user_transcript(text)
                                     
                                     last_soniox_text = text
-                                    last_soniox_time = time.monotonic()  # CRITICAL: Use monotonic to match client.last_model_activity_at
+                                    last_soniox_time = time.monotonic()  # Use monotonic to match client.last_model_output_at
                                     
                                     # Cancel previous timer if exists
                                     if fallback_timer_task and not fallback_timer_task.done():
@@ -404,13 +414,13 @@ async def media_stream(websocket: WebSocket):
                                         
                                             # Check if fallback is needed (robust production logic)
                                             from src.gemini.client import TurnState
-                                            now_ms = time.monotonic() * 1000  # Use monotonic to match last_soniox_time and last_model_activity_at
+                                            now_ms = time.monotonic() * 1000  # Use monotonic
                                             soniox_time_ms = last_soniox_time * 1000
                                         
-                                            # Get last model activity timestamp (convert to ms)
-                                            last_model_activity_ms = (
-                                                client.last_model_activity_at * 1000 
-                                                if hasattr(client, 'last_model_activity_at') and client.last_model_activity_at
+                                            # Get last model output timestamp (convert to ms)
+                                            last_model_output_ms = (
+                                                client.last_model_output_at * 1000 
+                                                if hasattr(client, 'last_model_output_at') and client.last_model_output_at
                                                 else 0
                                             )
                                         
@@ -421,21 +431,49 @@ async def media_stream(websocket: WebSocket):
                                             age_ms = now_ms - soniox_time_ms
                                             is_fresh = age_ms <= freshness_window_ms
                                         
-                                            # Activity check: no model activity after Soniox detected the utterance
-                                            no_model_activity_after = last_model_activity_ms <= soniox_time_ms
+                                            # Output check: no model output after Soniox detected the utterance
+                                            no_model_output_after = last_model_output_ms <= soniox_time_ms
+                                            
+                                            # NEW GATING: Check conditions
+                                            # 1. Bot speaking check (playout_until)
+                                            now_sec = time.monotonic()
+                                            playout_until = getattr(client, "playout_until", 0.0)
+                                            bot_speaking = now_sec < playout_until
+                                            
+                                            # 2. Tools in flight check
+                                            tools_in_flight = getattr(client, "tools_in_flight", 0)
+                                            no_tools = tools_in_flight == 0
+                                            
+                                            # 3. Duplicate injection check (1.5s window)
+                                            last_injected_text = getattr(client, "last_fallback_text", None)
+                                            last_injected_ms = getattr(client, "last_fallback_injected_ms", 0)
+                                            is_duplicate = (last_injected_text == text) and ((now_ms - last_injected_ms) < 1500)
                                         
                                             # Cooldown check (prevent spam)
                                             nonlocal last_fallback_time
                                             time_since_last_fallback = now_ms - (last_fallback_time * 1000 if last_fallback_time else 0)
                                             cooldown_ok = time_since_last_fallback >= cooldown_ms
+                                            
+                                            # Debug log (CRITICAL for diagnosing fallback issues)
+                                            turn_val = client.turn_state.value if hasattr(client, 'turn_state') else 'unknown'
+                                            logger.info(
+                                                f"[fallback debug] turn={turn_val} "
+                                                f"bot_speaking={bot_speaking} (delta={playout_until - now_sec:.2f}s) "
+                                                f"no_output={no_model_output_after} "
+                                                f"tools={tools_in_flight} "
+                                                f"dup={is_duplicate} "
+                                                f"fresh={is_fresh} "
+                                            )
                                         
                                             should_fallback = (
-                                                client.turn_state == TurnState.USER  # Still waiting for user
-                                                and no_model_activity_after  # No model activity after utterance
-                                                and is_fresh  # Not stale
-                                                and len(text) <= max_length  # Short utterance (chars)
-                                                and word_count <= max_words  # Short utterance (words)
-                                                and cooldown_ok  # Not spamming
+                                                not bot_speaking           # Don't inject while bot is speaking
+                                                and no_tools               # Don't inject if tool execution in progress
+                                                and no_model_output_after  # Model hasn't responded to this utterance
+                                                and not is_duplicate       # Don't inject duplicates
+                                                and is_fresh               # Not stale
+                                                and len(text) <= max_length
+                                                and word_count <= max_words
+                                                and cooldown_ok
                                             )
                                         
                                             if should_fallback:
@@ -444,17 +482,21 @@ async def media_stream(websocket: WebSocket):
                                                     f"Injecting Soniox text: '{text}' "
                                                     f"(len={len(text)}, words={word_count}, age={age_ms:.0f}ms)"
                                                 )
+                                                
+                                                # Record injection to prevent duplicates
+                                                client.last_fallback_text = text
+                                                client.last_fallback_injected_ms = now_ms
+                                                
                                                 await client.send_text(text)
                                                 last_fallback_time = time.monotonic()  # Use monotonic to match now_ms
                                             else:
                                                 logger.info(
                                                     f"✅ Fallback aborted for '{text}': "
-                                                    f"turn={client.turn_state.value}, "
-                                                    f"model_activity={not no_model_activity_after}, "
+                                                    f"bot_speaking={bot_speaking}, "
+                                                    f"model_output={not no_model_output_after}, "
+                                                    f"tools={tools_in_flight}, "
                                                     f"fresh={is_fresh}, "
-                                                    f"len_ok={len(text) <= max_length}, "
-                                                    f"words_ok={word_count <= max_words}, "
-                                                    f"cooldown_ok={cooldown_ok}"
+                                                    f"dup={is_duplicate}"
                                                 )
                                         except asyncio.CancelledError:
                                             pass  # Task cancelled (new Soniox transcript)
@@ -476,6 +518,12 @@ async def media_stream(websocket: WebSocket):
                                 
                                 await soniox_client.connect()
                                 logger.info("✅ Soniox STT initialized (Dual Channel mode)")
+                                
+                                # Tell Gemini client that Soniox is active, so Gemini input transcription can remain a fallback
+                                try:
+                                    setattr(client, "soniox_is_active", True)
+                                except Exception:
+                                    pass
                                 
                             except Exception as e:
                                 logger.error(f"❌ Failed to initialize Soniox: {e}", exc_info=True)
@@ -555,19 +603,28 @@ async def media_stream(websocket: WebSocket):
                                 if client:
                                     now = time.monotonic()
                                     
-                                    # Calculate audio duration: μ-law, 8kHz, 1 byte per sample
-                                    duration_s = len(resampled) / 8000.0
+                                    # Calculate audio duration: PCM int16 (2 bytes per sample), 8kHz
+                                    BYTES_PER_SAMPLE = 2  # int16 PCM
+                                    duration_s = len(resampled) / (8000.0 * BYTES_PER_SAMPLE)
                                     
-                                    # Extend playout window (handles bursty delivery)
-                                    client.playout_until = max(client.playout_until, now) + duration_s + 0.2
+                                    # Update playout tracking
+                                    # CRITICAL: Only add buffer overlap if starting fresh.
+                                    # Do NOT add 200ms per packet, or playout_until will drift by seconds!
+                                    if client.playout_until > now:
+                                        # Continuous playback - just append duration
+                                        client.playout_until += duration_s
+                                    else:
+                                        # Buffer empty / starting fresh - add duration + small network jitter buffer
+                                        client.playout_until = now + duration_s + 0.1
                                     
                                     # Track playout start ONCE per turn (for barge-in grace period)
-                                    # CRITICAL: Set only on first chunk, not every chunk!
-                                    if not client.model_has_spoken_this_turn:
+                                    # Use dedicated flag to avoid coupling with receive loop
+                                    if not client.playout_started_this_turn:
                                         client.playout_started_at = now
-                                        logger.info(f"🎯 Model has spoken this turn (first audio, duration={duration_s:.2f}s, playout_started_at={now:.2f})")
+                                        client.playout_started_this_turn = True
+                                        logger.info(f"🎯 Playout started this turn (first audio, duration={duration_s:.2f}s, playout_started_at={now:.2f})")
                                     
-                                    # Mark that model has spoken
+                                    # Mark that model has spoken (used by watchdog)
                                     client.model_has_spoken_this_turn = True
                                     
                                     logger.debug(
@@ -648,7 +705,11 @@ async def media_stream(websocket: WebSocket):
                             # === GATING (turn-aware) ===
                             barge_in_vad_trigger = False
                             
-                            if not barge_in_enabled:
+                            if not client:
+                                # Gate 0: Client must exist
+                                pass  # Skip if client not initialized
+                                
+                            elif not barge_in_enabled:
                                 # Gate 1: Is barge-in enabled?
                                 pass  # Skip entire barge-in section
                                 
@@ -699,6 +760,14 @@ async def media_stream(websocket: WebSocket):
                                 # Set tail-audio ignore window (300ms)
                                 tail_ignore_s = config.get("vad.barge_in_tail_ignore_ms", 300) / 1000.0
                                 ignore_speaker_audio_until = now + tail_ignore_s
+                                
+                                # Clear pending turn_complete and reset playout state
+                                if hasattr(client, "pending_turn_end"):
+                                    client.pending_turn_end = False
+                                if hasattr(client, "playout_until"):
+                                    client.playout_until = 0.0
+                                if hasattr(client, "playout_started_this_turn"):
+                                    client.playout_started_this_turn = False
                                 
                                 # Transition to USER turn (integrates with silence mechanism)
                                 client.transition_to_user("barge-in")
@@ -790,7 +859,9 @@ async def media_stream(websocket: WebSocket):
                     
                     # Only accumulate RMS burst when ALL barge-in gates pass
                     # This prevents false accumulation during echo guard, grace period, etc.
-                    if not barge_in_enabled:
+                    if not client:
+                        rms_barge_in_accum_ms = 0.0
+                    elif not barge_in_enabled:
                         rms_barge_in_accum_ms = 0.0
                     elif not use_rms_barge_in:
                         rms_barge_in_accum_ms = 0.0
@@ -845,6 +916,14 @@ async def media_stream(websocket: WebSocket):
                             tail_ignore_s = config.get("vad.barge_in_tail_ignore_ms", 300) / 1000.0
                             ignore_speaker_audio_until = now + tail_ignore_s
                             
+                            # Clear pending turn_complete and reset playout state
+                            if hasattr(client, "pending_turn_end"):
+                                client.pending_turn_end = False
+                            if hasattr(client, "playout_until"):
+                                client.playout_until = 0.0
+                            if hasattr(client, "playout_started_this_turn"):
+                                client.playout_started_this_turn = False
+                            
                             client.transition_to_user("barge-in-rms")
                             client.user_silence_warning_level = 0  # Reset escalation
                             
@@ -866,13 +945,25 @@ async def media_stream(websocket: WebSocket):
                             noise_floor_rms = 0.98 * noise_floor_rms + 0.02 * rms
                     
                     # === 5. Forward Audio to Provider ===
-                    out_rate = 16000
-                    pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
-                    await mic_queue.put(pcm_16k)
-                    
-                    # Forward to Soniox (Dual Channel)
-                    if soniox_client and soniox_client.is_connected:
-                        await soniox_client.send_audio(pcm_16k)
+                    # Drop interruptions during the FIRST bot turn (intro)
+                    # This ensures the first user turn starts cleanly after the welcome message
+                    drop_audio = (client is not None and getattr(client, "turn_count", 1) == 0 and client.turn_state == TurnState.GEMINI)
+
+                    if drop_audio:
+                        # Log once per burst to avoid spam
+                        if rms_voice_mode and now - last_audio_log_time >= 2.0:
+                            logger.info("🚫 Dropping user audio during intro (Turn 0 suppression)")
+                            last_audio_log_time = now # Throttle logs
+                    else:
+                        out_rate = 16000
+                        pcm_16k = resample_audio(pcm_8k, 8000, out_rate)
+                        await mic_queue.put(pcm_16k)
+                        
+                        # Forward to Soniox (Dual Channel)
+                        # Note: We send to Soniox even if dropped for Gemini to keep transcript logs,
+                        # but fallback logic will be blocked by bot_speaking=True during intro.
+                        if soniox_client and soniox_client.is_connected:
+                            await soniox_client.send_audio(pcm_16k)
                     
                     # Track audio flow for observability
                     audio_enqueued_bytes += len(pcm_16k)
@@ -910,8 +1001,11 @@ async def media_stream(websocket: WebSocket):
              
              # Prepare transcript (JSON string)
              transcript_str = ""
-             if client and client.transcript_log:
-                 transcript_str = json.dumps(client.transcript_log, ensure_ascii=False)
+             if client:
+                 # Flush any final/interrupted turn data
+                 transcript_data = client.get_transcript()
+                 if transcript_data:
+                     transcript_str = json.dumps(transcript_data, ensure_ascii=False)
              
              emitter = get_supabase_vapi_webhook_emitter()
              asyncio.create_task(

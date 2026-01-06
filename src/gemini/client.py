@@ -33,9 +33,18 @@ class GeminiLiveClient:
         
         # 3-state turn management
         self.turn_state = TurnState.USER
-        self.last_model_activity_at = time.monotonic()  # For watchdog
+        self.turn_count = 0  # Track number of turns (0 = Intro)
         self.tools_in_flight = 0  # Counter for concurrent tool calls
         self.termination_queue = termination_queue  # Signal call termination
+        
+        # Timestamp tracking (SEPARATE concerns)
+        self.last_model_output_at = time.monotonic()  # Gemini→client output (audio/text/tool_call)
+        self.last_client_send_at = time.monotonic()   # Client→Gemini sends (text/tool_response)
+        
+        # Pending turn_complete buffer (debounce premature turn_complete)
+        self.pending_turn_end = False
+        self.pending_turn_end_deadline = 0.0
+        self.turn_end_grace_s = 1.5  # Wait this long after turn_complete before committing
         
         # User silence tracking (replaces pending timeout)
         self.last_user_activity_at = None       # Last confirmed user activity (cleaner design)
@@ -46,6 +55,7 @@ class GeminiLiveClient:
         # Watchdog state
         self.playout_until = 0.0  # Monotonic timestamp when audio playback should finish
         self.playout_started_at = 0.0  # Monotonic timestamp when FIRST chunk of turn is sent (for barge-in grace period)
+        self.playout_started_this_turn = False  # Track if playout has started (Twilio sender sets this)
         self.model_has_spoken_this_turn = False  # Track if Gemini actually spoke (not just committed)
         self.silence_accumulator_s = 0.0  # Accumulate actual silence (only increments when silent)
         self.nudge_count_this_turn = 0  # Limit nudges per Gemini turn
@@ -57,11 +67,53 @@ class GeminiLiveClient:
         self.current_turn_transcript = []  # Accumulate assistant transcript chunks for current turn
         self.current_user_transcript = []  # Accumulate user transcript chunks for current turn
         self.transcript_log = []  # Full conversation transcript
+        
+        # Soniox integration hint (media_stream sets this when Soniox is connected)
+        # If Soniox is active, we keep using Soniox as the primary source of user transcripts.
+        self.soniox_is_active = False
+        
+        # Deduping for Gemini input transcription (prevents repeated identical commits)
+        self._last_gemini_user_text = None
+        self._last_gemini_user_text_at = 0.0
 
-    def mark_model_activity(self):
-        """Update last model activity timestamp (for watchdog later)."""
-        self.last_model_activity_at = time.monotonic()
-        self.silence_accumulator_s = 0.0  # Reset silence on any activity
+    def get_transcript(self):
+        """Returns the full transcript log, flushing any pending chunks."""
+        # Flush any lingering assistant text (e.g. from interrupted turn or hangup)
+        full_turn_transcript = "".join(self.current_turn_transcript)
+        if full_turn_transcript:
+            self.transcript_log.append({
+                "turn_id": len(self.transcript_log) + 1,
+                "speaker": "assistant",
+                "timestamp": time.time(),
+                "text": full_turn_transcript
+            })
+            self.current_turn_transcript = []
+        
+        # Flush lingering user text
+        full_user_transcript = "".join(self.current_user_transcript)
+        if full_user_transcript:
+            self.transcript_log.append({
+                "turn_id": len(self.transcript_log) + 1,
+                "speaker": "user",
+                "timestamp": time.time(),
+                "text": full_user_transcript
+            })
+            self.current_user_transcript = []
+            
+        return self.transcript_log
+
+    def mark_model_output(self, reason: str):
+        """
+        Update timestamp when Gemini sends REAL output (audio/text). 
+        NOT for tool calls (model input request) or client sends.
+        """
+        self.last_model_output_at = time.monotonic()
+        self.silence_accumulator_s = 0.0  # Reset silence on model output
+        
+        # Cancel pending turn_end if model is still outputting
+        if self.pending_turn_end:
+            logger.info(f"⏸️ Pending turn_end cancelled (reason={reason})")
+            self.pending_turn_end = False
 
     def add_user_transcript(self, text: str):
         """
@@ -100,15 +152,34 @@ class GeminiLiveClient:
         old_state = self.turn_state.value if self.turn_state else "none"
         self.turn_state = TurnState.USER
         
-        # Reset silence timer (bot speech doesn't count as user silence)
-        # BUT preserve warning level (escalation continues unless user actually speaks)
-        self.last_user_activity_at = time.monotonic()
+        # Flush assistant transcript (captures speech up to this point, including interruptions)
+        full_transcript = "".join(self.current_turn_transcript)
+        if full_transcript:
+            self.transcript_log.append({
+                "turn_id": len(self.transcript_log) + 1,
+                "speaker": "assistant",
+                "timestamp": time.time(),
+                "text": full_transcript
+            })
+            logger.info(f"💾 Assistant transcript (committed): {full_transcript[:100]}...")
+        self.current_turn_transcript = []  # Reset for next turn
+        
+        # DON'T reset last_user_activity_at here!
+        # Only reset when user ACTUALLY speaks (via mark_user_activity)
+        # This preserves escalation level correctly
+        # Initialize if not set (first transition to user)
+        if self.last_user_activity_at is None:
+            self.last_user_activity_at = time.monotonic()
         
         # Reset turn tracking
+        self.turn_count += 1  # Increment turn counter (Transitioning to USER starts next cycle)
         self.nudge_count_this_turn = 0  # Reset for next turn
         self.silence_accumulator_s = 0.0  # Reset silence
         self.playout_until = 0.0  # Reset playout tracking
+        self.playout_started_at = 0.0  # Reset playout start time
+        self.playout_started_this_turn = False  # Reset playout flag
         self.model_has_spoken_this_turn = False  # Reset speech flag
+        self.pending_turn_end = False  # Clear pending flag
         
         # Log turn change with silence tracking info
         warning_interval = config.get("turn.user_silence_warning_interval_s", 6)
@@ -141,12 +212,67 @@ class GeminiLiveClient:
         self.current_user_transcript = []  # Reset for next turn
         
         self.turn_state = TurnState.GEMINI
-        self.mark_model_activity()  # Update activity timestamp
+        # Don't call mark_model_output() here - only call it when actual output arrives
+        # Don't reset model_has_spoken_this_turn - it may have already been set by first audio chunk
         self.nudge_count_this_turn = 0  # Reset nudge counter for new turn
         self.silence_accumulator_s = 0.0  # Reset silence
         self.playout_until = 0.0  # Reset playout tracking
-        self.model_has_spoken_this_turn = False  # Reset speech flag (will be set when audio arrives)
+        self.playout_started_at = 0.0  # Reset playout start time
+        self.playout_started_this_turn = False  # Reset playout flag
         logger.info(f"🔄 TURN {old_state} → GEMINI ({reason})")
+
+    def maybe_commit_turn_end(self):
+        """
+        Check if pending turn_complete should be committed.
+        Called periodically (e.g., from silence monitor loop).
+        Only commits after grace period AND playout finished AND no tools pending.
+        """
+        if self.turn_state != TurnState.GEMINI:
+            return False  # Not in GEMINI, nothing to commit
+        
+        if not self.pending_turn_end:
+            return False  # No pending turn_complete
+        
+        now = time.monotonic()
+        
+        # Wait for grace period
+        if now < self.pending_turn_end_deadline:
+            return False
+        
+        # Wait for audio playout to finish
+        if now < self.playout_until:
+            return False
+        
+        # Wait for tools to complete
+        if self.tools_in_flight > 0:
+            return False
+            
+        # Backstop: If pending turn end, playout finished, no tools, and model silent for X seconds -> commit
+        # This handles cases where Gemini sends turn_complete but no further output, preventing infinite PENDING state
+        BACKSTOP_S = 3.0
+        model_silent_s = now - (self.last_model_output_at or 0)
+        
+        if self.pending_turn_end and now >= self.playout_until and self.tools_in_flight == 0 and model_silent_s >= BACKSTOP_S:
+            logger.warning(f"⚠️ BACKSTOP commit (model_silent_s={model_silent_s:.1f}s)")
+            self.pending_turn_end = False
+            # Fall through to commit logic...
+        
+        # All conditions met - commit the transition
+        self.pending_turn_end = False
+        logger.info("✅ Pending turn_complete committed → transitioning to USER")
+        
+        # Transcript flushing moved to transition_to_user()
+        # This ensures we capture transcripts correctly even on barge-in/interrupts
+        
+        # Reset playout tracking (good hygiene before transition)
+        self.playout_started_at = 0.0
+        self.playout_started_this_turn = False
+        
+        # Reset user activity timestamp NOW (start of user's turn)
+        self.last_user_activity_at = time.monotonic()
+        
+        self.transition_to_user(reason="turn_complete_committed")
+        return True
 
     # DEPRECATED: No longer used with new silence detection system
     # def on_user_utterance_maybe_complete(self, reason="vad_end_or_silence"):
@@ -196,6 +322,14 @@ class GeminiLiveClient:
                 # Wrap declarations in a Tool object as required by SDK
                 tool_obj = types.Tool(function_declarations=declarations)
                 config_params["tools"] = [tool_obj]
+
+        # Activity handling (barge-in behavior)
+        activity_handling = config.get("gemini.activity_handling", "START_OF_ACTIVITY_INTERRUPTS")
+        if activity_handling == "NO_INTERRUPTION":
+            config_params["realtime_input_config"] = {
+                "activity_handling": "NO_INTERRUPTION"
+            }
+            logger.info("🔇 Barge-in disabled: Gemini will not be interrupted mid-sentence")
 
         if system_instruction:
             config_params["system_instruction"] = system_instruction
@@ -278,7 +412,7 @@ class GeminiLiveClient:
         """Send text input to Gemini with optional end_of_turn flag."""
         if self.session:
             await self.session.send(input=text, end_of_turn=end_of_turn)
-            self.mark_model_activity()
+            self.last_client_send_at = time.monotonic()  # Track client sends separately
             logger.info(f"📤 Sent text to Gemini: {text} (eot={end_of_turn})")
 
     async def interrupt(self):
@@ -326,7 +460,8 @@ class GeminiLiveClient:
                         if response.tool_call and response.tool_call.function_calls:
                             has_tool = True
                             commit_reason.append("tool")
-                            self.mark_model_activity()  # Mark immediately on tool call
+                            # User instruction: Do NOT mark_model_output on tool calls
+                            # self.mark_model_output("tool_call_start")  
                         
                         # Single pass through model_turn parts
                         if response.server_content and response.server_content.model_turn:
@@ -339,7 +474,7 @@ class GeminiLiveClient:
                                         commit_reason.append("audio")
                                     # Enqueue audio immediately (single pass!)
                                     await self.output_queue.put(inline.data)
-                                    self.mark_model_activity()  # Mark on each audio chunk
+                                    self.mark_model_output("audio_chunk")  # Mark on each audio chunk
                                     # Set flag for watchdog (first audio = Gemini has spoken)
                                     if not self.model_has_spoken_this_turn:
                                         self.model_has_spoken_this_turn = True
@@ -350,7 +485,7 @@ class GeminiLiveClient:
                                     if not has_text:
                                         has_text = True
                                         commit_reason.append("text")
-                                        self.mark_model_activity()  # Mark on text
+                                        self.mark_model_output("model_text")  # Mark on text
                         
                         # Commit if ANY real output detected
                         if has_audio or has_text or has_tool:
@@ -366,7 +501,7 @@ class GeminiLiveClient:
                                 inline = getattr(part, "inline_data", None)
                                 if inline and isinstance(inline.data, (bytes, bytearray)) and len(inline.data) > 0:
                                     await self.output_queue.put(inline.data)
-                                    self.mark_model_activity()  # Mark on each audio chunk
+                                    self.mark_model_output("audio_chunk")  # Mark on each audio chunk
                                     # Set flag for watchdog
                                     if not self.model_has_spoken_this_turn:
                                         self.model_has_spoken_this_turn = True
@@ -374,18 +509,34 @@ class GeminiLiveClient:
                                 
                                 # Mark on text too
                                 if hasattr(part, 'text') and part.text:
-                                    self.mark_model_activity()
+                                    self.mark_model_output("model_text")
                         
                         # Mark on tool call even if already in GEMINI
                         if response.tool_call and response.tool_call.function_calls:
-                            self.mark_model_activity()
+                            pass # User instruction: Do NOT mark_model_output on tool calls
+                            # self.mark_model_output("tool_call_start")
                     
                     # === Input Transcription DISABLED - Using Soniox for accurate Hebrew ===
-                    # Gemini's input_transcription is replaced by Soniox STT (see add_user_transcript method)
-                    # if response.server_content and response.server_content.input_transcription:
-                    #     user_text = response.server_content.input_transcription.text
-                    #     self.current_user_transcript.append(user_text)
-                    #     logger.debug(f"📝 User transcript chunk: {user_text[:50]}...")
+                    # If Soniox is active, we keep it as the source of user transcript logs.
+                    # Otherwise, fall back to Gemini input transcription (when enabled) so we still get user transcripts.
+                    if (
+                        not self.soniox_is_active
+                        and config.get("gemini.enable_transcription", False)
+                        and response.server_content
+                        and response.server_content.input_transcription
+                    ):
+                        user_text = (response.server_content.input_transcription.text or "").strip()
+                        if user_text:
+                            now = time.monotonic()
+                            is_dup = (
+                                self._last_gemini_user_text == user_text
+                                and (now - self._last_gemini_user_text_at) < 1.5
+                            )
+                            if not is_dup:
+                                self.current_user_transcript.append(user_text)
+                                self._last_gemini_user_text = user_text
+                                self._last_gemini_user_text_at = now
+                                logger.debug(f"📝 User transcript chunk (Gemini): {user_text[:50]}...")
                     
                     # === Capture Output Transcription (Bot Speech) ===
                     if response.server_content and response.server_content.output_transcription:
@@ -393,22 +544,20 @@ class GeminiLiveClient:
                         self.current_turn_transcript.append(transcript_text)
                         logger.debug(f"📝 Assistant transcript chunk: {transcript_text[:50]}...")
                     
-                    # Handle turn_complete
+                    # Handle turn_complete - use pending buffer to avoid premature transitions
                     if response.server_content and response.server_content.turn_complete:
-                        # Save accumulated transcript before transitioning
-                        full_transcript = "".join(self.current_turn_transcript)
-                        if full_transcript:
-                            self.transcript_log.append({
-                                "turn_id": len(self.transcript_log) + 1,
-                                "speaker": "assistant",
-                                "timestamp": time.time(),
-                                "text": full_transcript
-                            })
-                            logger.info(f"💾 Assistant transcript: {full_transcript[:100]}...")
-                        self.current_turn_transcript = []  # Reset for next turn
+                        time_since_audio = time.monotonic() - self.last_model_output_at
+                        logger.info(f"📨 turn_complete received | time_since_last_output={time_since_audio:.2f}s | turn_state={self.turn_state.value}")
                         
-                        logger.info("✅ Gemini turn_complete received")
-                        self.transition_to_user(reason="turn_complete")
+                        # Buffer the turn_complete - don't transition immediately
+                        # This handles NO_INTERRUPTION mode where Gemini sends turn_complete
+                        # but immediately starts a new response
+                        self.pending_turn_end = True
+                        self.pending_turn_end_deadline = time.monotonic() + self.turn_end_grace_s
+                        logger.info(f"⏳ turn_complete buffered (will commit in {self.turn_end_grace_s}s unless new output arrives)")
+                        
+                        # DON'T flush transcript here - wait until maybe_commit_turn_end()
+                        # This prevents splitting one logical turn if Gemini continues output
                     if response.tool_call:
                         for fc in response.tool_call.function_calls:
                             # Use fire-and-forget task to avoid blocking audio consumption
@@ -451,8 +600,8 @@ class GeminiLiveClient:
             
             logger.info(f"✅ Tool '{name}' executed and response sent")
             
-            # Mark activity after tool response sent
-            self.mark_model_activity()
+            # Track client send (tool response is client→Gemini)
+            self.last_client_send_at = time.monotonic()
             
         except Exception as e:
             logger.error(f"Tool execution error: {e}", exc_info=True)
@@ -483,6 +632,9 @@ class GeminiLiveClient:
             try:
                 await asyncio.sleep(0.2)  # Check every 200ms
                 
+                # Check if pending turn_complete should be committed (before turn state check)
+                self.maybe_commit_turn_end()
+                
                 # Only monitor during USER turn
                 if self.turn_state != TurnState.USER:
                     continue
@@ -509,6 +661,11 @@ class GeminiLiveClient:
                     if now - last_log_time >= log_interval:
                         logger.debug(f"🔊 Bot speaking: {playout_remaining:.1f}s remaining (silence timer paused)")
                         last_log_time = now
+                    continue
+                
+                # Skip if Gemini was recently sending audio (buffer for playback delay)
+                time_since_model_output = now - self.last_model_output_at
+                if time_since_model_output < 1.5:
                     continue
                 
                 # Calculate time until next warning (always warning_interval from timer reset)
@@ -653,7 +810,8 @@ class GeminiLiveClient:
                     
                     # Update state
                     self.nudge_count_this_turn += 1
-                    self.mark_model_activity()  # Reset activity timer and silence accumulator
+                    # Nudge is a client→Gemini send, just reset silence accumulator
+                    self.silence_accumulator_s = 0.0
             
             except asyncio.CancelledError:
                 logger.debug("Turn-based watchdog cancelled")
