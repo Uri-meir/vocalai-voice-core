@@ -325,11 +325,12 @@ class GeminiLiveClient:
 
         # Activity handling (barge-in behavior)
         activity_handling = config.get("gemini.activity_handling", "START_OF_ACTIVITY_INTERRUPTS")
-        if activity_handling == "NO_INTERRUPTION":
-            config_params["realtime_input_config"] = {
-                "activity_handling": "NO_INTERRUPTION"
-            }
-            logger.info("🔇 Barge-in disabled: Gemini will not be interrupted mid-sentence")
+        # Always send realtime_input_config so we don't rely on backend defaults.
+        # This controls whether user activity can interrupt model generation.
+        config_params["realtime_input_config"] = {
+            "activity_handling": activity_handling
+        }
+        logger.info(f"🎤 Gemini activity_handling={activity_handling}")
 
         if system_instruction:
             config_params["system_instruction"] = system_instruction
